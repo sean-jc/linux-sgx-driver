@@ -17,6 +17,7 @@
 
 #include "isgx_user.h"
 #include "isgx_arch.h"
+#include <linux/atomic.h>
 #include <linux/kref.h>
 #include <linux/rbtree.h>
 #include <linux/rwsem.h>
@@ -49,41 +50,10 @@ struct isgx_epc_page {
 
 struct isgx_va_page {
 	struct isgx_epc_page	*epc_page;
+	atomic_t used;
 	DECLARE_BITMAP(slots, ISGX_VA_SLOT_COUNT);
 	struct list_head	list;
 };
-
-/**
- * isgx_alloc_va_slot() - allocate VA slot from a VA page
- *
- * @page: VA page
- *
- * Returns offset to a free VA slot. If there are no free slots, an offset of
- * PAGE_SIZE is returned.
- */
-static inline unsigned int isgx_alloc_va_slot(struct isgx_va_page *page)
-{
-	int slot = find_first_zero_bit(page->slots, ISGX_VA_SLOT_COUNT);
-
-	if (slot < ISGX_VA_SLOT_COUNT)
-		set_bit(slot, page->slots);
-
-	return slot << 3;
-}
-
-/**
- * isgx_free_va_slot() - free VA slot from a VA page
- *
- * @page:	VA page
- * @offset:	the offset of the VA slot
- *
- * Releases VA slot.
- */
-static inline void isgx_free_va_slot(struct isgx_va_page *page,
-				     unsigned int offset)
-{
-	clear_bit(offset >> 3, page->slots);
-}
 
 struct isgx_enclave_page {
 	unsigned long		addr;
@@ -126,7 +96,6 @@ struct isgx_enclave {
 	struct mutex			lock;
 	unsigned long			base;
 	unsigned long			size;
-	struct list_head		va_pages;
 	struct rb_root			enclave_rb;
 	struct list_head		add_page_reqs;
 	struct work_struct		add_page_work;
@@ -224,5 +193,55 @@ struct isgx_epc_page *isgx_alloc_epc_page(
 void isgx_free_epc_page(struct isgx_epc_page *entry,
 			struct isgx_enclave *encl,
 			unsigned int flags);
+int isgx_alloc_va_page(struct isgx_enclave_page *enclave_page);
+void isgx_free_va_page(struct isgx_va_page *va_page);
+
+/**
+ * isgx_alloc_va_slot() - allocate VA slot from a VA page
+ *
+ * @page: VA page
+ *
+ * Returns offset to a free VA slot. If there are no free slots, an offset of
+ * PAGE_SIZE is returned.
+ */
+static inline unsigned int isgx_alloc_va_slot(struct isgx_va_page *page)
+{
+	int slot;
+	if (atomic_read(&page->used) == ISGX_VA_SLOT_COUNT)
+		return ISGX_VA_SLOT_COUNT << 3;
+
+	while (1) {
+		/* Races for free slots are allowed, someone may have claimed the last
+		 * free slot, hence a graceful return instead of a BUG().
+		 */
+		slot = find_first_zero_bit(page->slots, ISGX_VA_SLOT_COUNT);
+		if (slot == ISGX_VA_SLOT_COUNT)
+			break;
+
+		if (!test_and_set_bit_lock(slot, page->slots)) {
+			atomic_inc(&page->used);
+			break;
+		}
+	}
+	return slot << 3;
+}
+
+/**
+ * isgx_free_va_slot() - free VA slot from a VA page
+ *
+ * @page:	VA page
+ * @offset:	the offset of the VA slot
+ *
+ * Releases VA slot and frees the entire VA page if all slots were freed.
+ */
+static inline void isgx_free_va_slot(struct isgx_va_page *page,
+				     unsigned int offset)
+{
+	clear_bit(offset >> 3, page->slots);
+
+	if (atomic_dec_and_test(&page->used))
+		isgx_free_va_page(page);
+}
+
 
 #endif /* __ARCH_X86_ISGX_H__ */

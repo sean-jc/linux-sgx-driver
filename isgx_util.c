@@ -378,7 +378,6 @@ void isgx_enclave_release(struct kref *ref)
 {
 	struct rb_node *rb1, *rb2;
 	struct isgx_enclave_page *entry;
-	struct isgx_va_page *va_page;
 	struct isgx_enclave *enclave =
 		container_of(ref, struct isgx_enclave, refcount);
 
@@ -398,21 +397,18 @@ void isgx_enclave_release(struct kref *ref)
 			isgx_free_epc_page(entry->epc_page, enclave,
 					   ISGX_FREE_EREMOVE);
 		}
+
+		isgx_free_va_slot(entry->va_page, entry->va_offset);
+
 		kfree(entry);
 		rb1 = rb2;
-	}
-
-	while (!list_empty(&enclave->va_pages)) {
-		va_page = list_first_entry(&enclave->va_pages,
-					   struct isgx_va_page, list);
-		list_del(&va_page->list);
-		isgx_free_epc_page(va_page->epc_page, NULL, ISGX_FREE_EREMOVE);
-		kfree(va_page);
 	}
 
 	if (enclave->secs_page.epc_page)
 		isgx_free_epc_page(enclave->secs_page.epc_page, NULL,
 				   ISGX_FREE_EREMOVE);
+
+	isgx_free_va_slot(enclave->secs_page.va_page, enclave->secs_page.va_offset);
 
 	enclave->secs_page.epc_page = NULL;
 
