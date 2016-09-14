@@ -117,70 +117,6 @@ static int enclave_rb_insert(struct rb_root *root,
 	return 0;
 }
 
-/**
- * construct_enclave_page() - populate a new enclave page instance
- * @enclave	an enclave
- * @entry	the enclave page to be populated
- * @addr	the linear address of the enclave page
- *
- * Allocates VA slot for the enclave page and fills out its fields. Returns
- * an error code on failure that can be either a POSIX error code or one of the
- * error codes defined in isgx_user.h.
- */
-static int construct_enclave_page(struct isgx_enclave *enclave,
-				  struct isgx_enclave_page *entry,
-				  unsigned long addr)
-{
-	struct isgx_va_page *va_page;
-	struct isgx_epc_page *epc_page = NULL;
-	unsigned int va_offset = PAGE_SIZE;
-	void *vaddr;
-	int ret = 0;
-
-	list_for_each_entry(va_page, &enclave->va_pages, list) {
-		va_offset = isgx_alloc_va_slot(va_page);
-		if (va_offset < PAGE_SIZE)
-			break;
-	}
-
-	if (va_offset == PAGE_SIZE) {
-		va_page = kzalloc(sizeof(*va_page), GFP_KERNEL);
-		if (!va_page)
-			return -ENOMEM;
-
-		epc_page = isgx_alloc_epc_page(NULL, 0);
-		if (IS_ERR(epc_page)) {
-			kfree(va_page);
-			return PTR_ERR(epc_page);
-		}
-
-		vaddr = isgx_get_epc_page(epc_page);
-		BUG_ON(!vaddr);
-		ret = __epa(vaddr);
-		isgx_put_epc_page(vaddr);
-		if (ret) {
-			isgx_err(enclave, "EPA returned %d\n", ret);
-			isgx_free_epc_page(epc_page, NULL, ISGX_FREE_EREMOVE);
-			kfree(va_page);
-			/* This probably a driver bug. Better to crash cleanly
-			 * than let the failing driver to run.
-			 */
-			BUG();
-		}
-
-		va_page->epc_page = epc_page;
-		va_offset = isgx_alloc_va_slot(va_page);
-		list_add(&va_page->list, &enclave->va_pages);
-	}
-
-	entry->enclave = enclave;
-	entry->va_page = va_page;
-	entry->va_offset = va_offset;
-	entry->addr = addr;
-
-	return 0;
-}
-
 static int get_enclave(unsigned long addr, struct isgx_enclave **enclave)
 {
 	struct mm_struct *mm = current->mm;
@@ -359,7 +295,6 @@ static long isgx_ioctl_enclave_create(struct file *filep, unsigned int cmd,
 
 	kref_init(&enclave->refcount);
 	INIT_LIST_HEAD(&enclave->add_page_reqs);
-	INIT_LIST_HEAD(&enclave->va_pages);
 	INIT_LIST_HEAD(&enclave->vma_list);
 	INIT_LIST_HEAD(&enclave->load_list);
 	INIT_LIST_HEAD(&enclave->enclave_list);
@@ -384,9 +319,10 @@ static long isgx_ioctl_enclave_create(struct file *filep, unsigned int cmd,
 	}
 
 	enclave->secs_page.epc_page = secs_epc_page;
+	enclave->secs_page.enclave = enclave;
+	enclave->secs_page.addr = enclave->base + enclave->size;
 
-	ret = construct_enclave_page(enclave, &enclave->secs_page,
-				     enclave->base + enclave->size);
+	ret = isgx_alloc_va_page(&enclave->secs_page);
 	if (ret)
 		goto out;
 
@@ -511,7 +447,10 @@ static int __enclave_add_page(struct isgx_enclave *enclave,
 		}
 	}
 
-	ret = construct_enclave_page(enclave, enclave_page, addp->addr);
+	enclave_page->enclave = enclave;
+	enclave_page->addr = addp->addr;
+
+	ret = isgx_alloc_va_page(enclave_page);
 	if (ret) {
 		__free_page(tmp_page);
 		return -EINVAL;

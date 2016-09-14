@@ -25,6 +25,9 @@
 static LIST_HEAD(isgx_free_list);
 static DEFINE_SPINLOCK(isgx_free_list_lock);
 
+static LIST_HEAD(isgx_va_pages);
+static DECLARE_RWSEM(isgx_va_pages_sem);
+
 LIST_HEAD(isgx_tgid_ctx_list);
 DEFINE_MUTEX(isgx_tgid_ctx_mutex);
 unsigned int isgx_nr_total_epc_pages;
@@ -185,6 +188,13 @@ static int do_ewb(struct isgx_enclave *enclave,
 	isgx_put_epc_page(va);
 	isgx_put_epc_page(epc);
 	kunmap_atomic((void *) pginfo.srcpge);
+
+	/* Overwriting VA slots is allowed and is expected when reusing stale
+	 * slots, i.e. slots used for evicted pages whose application/enclave
+	 * has exited.
+	 */
+	if (ret == ISGX_VA_SLOT_OCCUPIED)
+		ret = 0;
 
 	if (ret != 0 && ret != ISGX_NOT_TRACKED)
 		isgx_err(enclave, "EWB returned %d\n", ret);
@@ -483,4 +493,91 @@ void isgx_free_epc_page(struct isgx_epc_page *entry,
 	list_add(&entry->free_list, &isgx_free_list);
 	isgx_nr_free_epc_pages++;
 	spin_unlock(&isgx_free_list_lock);
+}
+
+/**
+ * isgx_alloc_va_page() - Allocate a VA page (if necessary) for the enclave page
+ * @enclave_page	the enclave page to be associated with the VA slot
+ *
+ * Allocates VA slot for the enclave page and fills in the appropriate fields.
+ * Returns an error code on failure that can be either a POSIX error code or one
+ * of the error codes defined in isgx_user.h.  Allocates a new VA page in the EPC
+ * if there are no VA slots available.
+ */
+int isgx_alloc_va_page(struct isgx_enclave_page *enclave_page)
+{
+	struct isgx_va_page *va_page;
+	struct isgx_epc_page *epc_page = NULL;
+	unsigned int va_offset = PAGE_SIZE;
+	void *vaddr;
+	int ret;
+
+	down_read(&isgx_va_pages_sem);
+	list_for_each_entry(va_page, &isgx_va_pages, list) {
+		va_offset = isgx_alloc_va_slot(va_page);
+		if (va_offset < PAGE_SIZE)
+			break;
+	}
+	up_read(&isgx_va_pages_sem);
+
+	if (va_offset == PAGE_SIZE) {
+		va_page = kzalloc(sizeof(*va_page), GFP_KERNEL);
+		if (!va_page)
+			return -ENOMEM;
+
+		epc_page = isgx_alloc_epc_page(NULL, 0);
+		if (IS_ERR(epc_page)) {
+			kfree(va_page);
+			return PTR_ERR(epc_page);
+		}
+
+		vaddr = isgx_get_epc_page(epc_page);
+		BUG_ON(!vaddr);
+		ret = __epa(vaddr);
+		isgx_put_epc_page(vaddr);
+		if (ret) {
+			pr_err("isgx: EPA returned %d\n", ret);
+			isgx_free_epc_page(epc_page, NULL, ISGX_FREE_EREMOVE);
+			kfree(va_page);
+			/* This probably a driver bug. Better to crash cleanly
+			 * than let the failing driver to run.
+			 */
+			BUG();
+		}
+
+		va_page->epc_page = epc_page;
+		va_offset = isgx_alloc_va_slot(va_page);
+		BUG_ON(va_offset >= PAGE_SIZE);
+
+		down_write(&isgx_va_pages_sem);
+		list_add(&va_page->list, &isgx_va_pages);
+		up_write(&isgx_va_pages_sem);
+	}
+
+	enclave_page->va_page = va_page;
+	enclave_page->va_offset = va_offset;
+
+	return 0;
+}
+
+/* isgx_free_va_page() - Conditionally removes a VA page from the EPC
+ * @va_page		VA page to free
+ *
+ * It's possible a different thread allocated a slot in this VA page
+ * while we were waiting for the semaphore.  Re-check the number of
+ * used slots after acquiring the semaphore for writing.  Check the
+ * list itself for validity to as a a different thread (or threads)
+ * could have allocated and then freed (the last) slot while we were
+ * waiting for the semaphore, creating a race to free the VA page.
+ */
+void isgx_free_va_page(struct isgx_va_page *va_page)
+{
+	down_write(&isgx_va_pages_sem);
+	if (likely(atomic_read(&va_page->used) == 0 && !list_empty(&va_page->list))) {
+		BUG_ON(find_first_bit(va_page->slots, ISGX_VA_SLOT_COUNT) != ISGX_VA_SLOT_COUNT);
+		list_del_init(&va_page->list);
+		isgx_free_epc_page(va_page->epc_page, NULL, ISGX_FREE_EREMOVE);
+		kfree(va_page);
+	}
+	up_write(&isgx_va_pages_sem);
 }
