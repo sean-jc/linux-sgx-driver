@@ -239,10 +239,10 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 		return;
 	}
 
-	/* EBLOCK */
+	mutex_lock(&enclave->lock);
 
+	/* EBLOCK */
 	list_for_each_entry_safe(entry, tmp, src, load_list) {
-		mutex_lock(&enclave->lock);
 		evma = isgx_find_vma(enclave, entry->addr);
 		if (!evma) {
 			list_del(&entry->load_list);
@@ -250,7 +250,6 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 					   ISGX_FREE_EREMOVE);
 			entry->epc_page = NULL;
 			entry->flags &= ~ISGX_ENCLAVE_PAGE_RESERVED;
-			mutex_unlock(&enclave->lock);
 			continue;
 		}
 
@@ -259,27 +258,22 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 			list_del(&entry->load_list);
 			list_add_tail(&entry->load_list, &enclave->load_list);
 			entry->flags &= ~ISGX_ENCLAVE_PAGE_RESERVED;
-			mutex_unlock(&enclave->lock);
 			continue;
 		}
 
 		zap_vma_ptes(evma->vma, entry->addr, PAGE_SIZE);
 		do_eblock(entry->epc_page);
 		cnt++;
-		mutex_unlock(&enclave->lock);
 	}
 
-	/* ETRACK */
+	if (!cnt)
+		goto out;
 
-	mutex_lock(&enclave->lock);
+	/* ETRACK */
 	do_etrack(enclave->secs_page.epc_page);
-	mutex_unlock(&enclave->lock);
 
 	/* EWB */
-
-	mutex_lock(&enclave->lock);
 	i = 0;
-
 	while (!list_empty(src)) {
 		entry = list_first_entry(src, struct isgx_enclave_page, load_list);
 		list_del(&entry->load_list);
@@ -326,10 +320,10 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 			enclave->secs_page.epc_page = NULL;
 		}
 	}
-
-	mutex_unlock(&enclave->lock);
 	BUG_ON(i != cnt);
 
+out:
+	mutex_unlock(&enclave->lock);
 	isgx_unpin_mm(enclave);
 	kref_put(&enclave->refcount, isgx_enclave_release);
 }
