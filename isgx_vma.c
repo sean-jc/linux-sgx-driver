@@ -27,7 +27,6 @@
 static void isgx_vma_open(struct vm_area_struct *vma)
 {
 	struct isgx_enclave *enclave;
-	struct isgx_vma *evma;
 
 	/* Was vm_private_data nullified as a result of the previous fork? */
 	enclave = vma->vm_private_data;
@@ -37,26 +36,11 @@ static void isgx_vma_open(struct vm_area_struct *vma)
 	/* Was the process forked? mm_struct changes when the process is
 	 * forked.
 	 */
-	mutex_lock(&enclave->lock);
-	evma = list_first_entry(&enclave->vma_list,
-				struct isgx_vma, vma_list);
-	if (evma->vma->vm_mm != vma->vm_mm) {
-		mutex_unlock(&enclave->lock);
+	if (!enclave->mm || enclave->mm != vma->vm_mm) {
 		goto out_fork;
 	}
-	mutex_unlock(&enclave->lock);
 
-	mutex_lock(&enclave->lock);
-	if (!list_empty(&enclave->vma_list)) {
-		evma = kzalloc(sizeof(struct isgx_vma), GFP_KERNEL);
-		if (!evma) {
-			isgx_invalidate(enclave);
-		} else {
-			evma->vma = vma;
-			list_add_tail(&evma->vma_list, &enclave->vma_list);
-		}
-	}
-	mutex_unlock(&enclave->lock);
+	atomic_inc(&enclave->vma_cnt);
 
 	kref_get(&enclave->refcount);
 	return;
@@ -69,7 +53,6 @@ out_fork:
 static void isgx_vma_close(struct vm_area_struct *vma)
 {
 	struct isgx_enclave *enclave = vma->vm_private_data;
-	struct isgx_vma *evma;
 
 	/* If process was forked, VMA is still there but
 	 * vm_private_data is set to NULL.
@@ -77,25 +60,10 @@ static void isgx_vma_close(struct vm_area_struct *vma)
 	if (!enclave)
 		return;
 
-	mutex_lock(&enclave->lock);
-
-	/* On vma_close() we remove the vma from vma_list
-	 * there is a possibility that evma is not found
-	 * in case vma_open() has failed on memory allocation
-	 * and vma list has then been emptied
-	 */
-	evma = isgx_find_vma(enclave, vma->vm_start);
-	if (evma) {
-		list_del(&evma->vma_list);
-		kfree(evma);
-	}
+	atomic_dec(&enclave->vma_cnt);
 
 	vma->vm_private_data = NULL;
-
-	isgx_zap_tcs_ptes(enclave, vma);
 	zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
-
-	mutex_unlock(&enclave->lock);
 
 	kref_put(&enclave->refcount, isgx_enclave_release);
 }
@@ -174,7 +142,7 @@ static struct isgx_enclave_page *isgx_vma_do_fault(struct vm_area_struct *vma,
 
 	mutex_lock(&enclave->lock);
 
-	if (list_empty(&enclave->vma_list)) {
+	if (atomic_read(&enclave->vma_cnt) == 0) {
 		entry = ERR_PTR(-EFAULT);
 		goto out;
 	}

@@ -72,11 +72,6 @@ struct isgx_enclave_page {
 #define ISGX_ENCLAVE_SECS_EVICTED	0x04
 #define ISGX_ENCLAVE_SUSPEND		0x08
 
-struct isgx_vma {
-	struct vm_area_struct	*vma;
-	struct list_head	vma_list;
-};
-
 struct isgx_tgid_ctx {
 	struct pid			*tgid;
 	atomic_t			epc_cnt;
@@ -89,8 +84,8 @@ struct isgx_enclave {
 	unsigned int			flags;
 	struct task_struct		*owner;
 	struct mm_struct		*mm;
+	atomic_t			vma_cnt;
 	unsigned long			backing;
-	struct list_head		vma_list;
 	struct list_head		load_list;
 	struct kref			refcount;
 	struct mutex			lock;
@@ -149,10 +144,8 @@ void isgx_insert_pte(struct isgx_enclave *enclave,
 		     struct vm_area_struct *vma);
 int isgx_eremove(struct isgx_epc_page *epc_page);
 int isgx_test_and_clear_young(struct isgx_enclave_page *page);
-struct isgx_vma *isgx_find_vma(struct isgx_enclave *enclave,
+struct vm_area_struct *isgx_find_vma(struct isgx_enclave *enclave,
 			       unsigned long addr);
-void isgx_zap_tcs_ptes(struct isgx_enclave *enclave,
-		       struct vm_area_struct *vma);
 bool isgx_pin_mm(struct isgx_enclave *encl);
 void isgx_unpin_mm(struct isgx_enclave *encl);
 void isgx_invalidate(struct isgx_enclave *encl);

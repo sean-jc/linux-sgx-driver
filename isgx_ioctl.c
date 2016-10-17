@@ -140,7 +140,6 @@ static int set_enclave(unsigned long addr, struct isgx_enclave *enclave)
 {
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
-	struct isgx_vma *evma;
 	int ret;
 
 	down_read(&mm->mmap_sem);
@@ -151,16 +150,8 @@ static int set_enclave(unsigned long addr, struct isgx_enclave *enclave)
 	else
 		ret = 0;
 
+	atomic_inc(&enclave->vma_cnt);
 	vma->vm_private_data = enclave;
-
-	evma = kzalloc(sizeof(struct isgx_vma), GFP_KERNEL);
-	if (!evma) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	evma->vma = vma;
-	list_add_tail(&evma->vma_list, &enclave->vma_list);
 out:
 	up_read(&mm->mmap_sem);
 	return ret;
@@ -295,7 +286,6 @@ static long isgx_ioctl_enclave_create(struct file *filep, unsigned int cmd,
 
 	kref_init(&enclave->refcount);
 	INIT_LIST_HEAD(&enclave->add_page_reqs);
-	INIT_LIST_HEAD(&enclave->vma_list);
 	INIT_LIST_HEAD(&enclave->load_list);
 	INIT_LIST_HEAD(&enclave->enclave_list);
 	mutex_init(&enclave->lock);
@@ -781,7 +771,7 @@ static bool process_add_page_req(struct isgx_add_page_req *req)
 
 	mutex_lock(&enclave->lock);
 
-	if (list_empty(&enclave->vma_list) ||
+	if (!atomic_read(&enclave->vma_cnt) ||
 	    isgx_find_enclave(enclave->mm, enclave_page->addr, &vma))
 		goto out;
 

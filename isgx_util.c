@@ -190,16 +190,13 @@ static int isgx_test_and_clear_young_cb(pte_t *ptep, pgtable_t token,
  */
 int isgx_test_and_clear_young(struct isgx_enclave_page *page)
 {
-	struct mm_struct *mm;
-	struct isgx_vma *evma = isgx_find_vma(page->enclave, page->addr);
+	struct vm_area_struct *vma = isgx_find_vma(page->enclave, page->addr);
 
-	if (!evma)
+	if (!vma)
 		return 0;
 
-	mm = evma->vma->vm_mm;
-
-	return apply_to_page_range(mm, page->addr, PAGE_SIZE,
-				   isgx_test_and_clear_young_cb, mm);
+	return apply_to_page_range(vma->vm_mm, page->addr, PAGE_SIZE,
+				   isgx_test_and_clear_young_cb, vma->vm_mm);
 }
 
 /**
@@ -210,43 +207,13 @@ int isgx_test_and_clear_young(struct isgx_enclave_page *page)
  * Finds VMA for the given address of the enclave. Returns the VMA if
  * there is one containing the given address.
  */
-struct isgx_vma *isgx_find_vma(struct isgx_enclave *enclave,
+struct vm_area_struct *isgx_find_vma(struct isgx_enclave *enclave,
 			       unsigned long addr)
 {
-	struct isgx_vma *tmp;
-	struct isgx_vma *evma;
-
-	list_for_each_entry_safe(evma, tmp, &enclave->vma_list, vma_list) {
-		if (evma->vma->vm_start <= addr && evma->vma->vm_end > addr)
-			return evma;
-	}
-
-	isgx_dbg(enclave, "cannot find VMA at 0x%lx\n", addr);
-	return NULL;
-}
-
-/**
- * isgx_zap_tcs_ptes() - clear PTEs that contain TCS pages from some enclave VMA.
- * @enclave	an enclave
- * @vma:	a VMA of the enclave
- */
-void isgx_zap_tcs_ptes(struct isgx_enclave *enclave, struct vm_area_struct *vma)
-{
-	struct isgx_enclave_page *entry;
-	struct rb_node *rb;
-
-	BUG_ON(vma->vm_private_data != NULL && vma->vm_private_data != enclave);
-	BUG_ON(vma->vm_ops != &isgx_vm_ops);
-
-	rb = rb_first(&enclave->enclave_rb);
-	while (rb) {
-		entry = container_of(rb, struct isgx_enclave_page, node);
-		rb = rb_next(rb);
-		if (entry->epc_page && (entry->flags & ISGX_ENCLAVE_PAGE_TCS)
-			&& entry->addr >= vma->vm_start
-			&& entry->addr < vma->vm_end)
-			zap_vma_ptes(vma, entry->addr, PAGE_SIZE);
-	}
+	struct vm_area_struct *vma = find_vma(enclave->mm, addr);
+	if (!vma)
+		isgx_dbg(enclave, "cannot find VMA at 0x%lx\n", addr);
+	return vma;
 }
 
 /**
@@ -262,18 +229,13 @@ bool isgx_pin_mm(struct isgx_enclave *encl)
 	if (encl->flags & ISGX_ENCLAVE_SUSPEND)
 		return false;
 
-	mutex_lock(&encl->lock);
-	if (!list_empty(&encl->vma_list)) {
-		atomic_inc(&encl->mm->mm_count);
-	} else {
-		mutex_unlock(&encl->lock);
+	if (!atomic_read(&encl->vma_cnt))
 		return false;
-	}
-	mutex_unlock(&encl->lock);
 
+	atomic_inc(&encl->mm->mm_count);
 	down_read(&encl->mm->mmap_sem);
 
-	if (list_empty(&encl->vma_list)) {
+	if (!atomic_read(&encl->vma_cnt)) {
 		isgx_unpin_mm(encl);
 		return false;
 	}
@@ -295,24 +257,34 @@ void isgx_unpin_mm(struct isgx_enclave *encl)
 }
 
 /**
- * isgx_unpin_mm - invalidate the enclave
+ * isgx_invalidate - Invalidate the enclave
  *
- * @encl:	an enclave
+ * @enclave:	an enclave
  *
- * Unmap TCS pages and empty the VMA list.
+ * Zap PTEs for all TCS pages 
  */
-void isgx_invalidate(struct isgx_enclave *encl)
+void isgx_invalidate(struct isgx_enclave *enclave)
 {
-	struct isgx_vma *vma;
+	struct vm_area_struct *vma;
+	struct isgx_enclave_page *entry;
+	struct rb_node *rb;
 
-	list_for_each_entry(vma, &encl->vma_list, vma_list)
-		isgx_zap_tcs_ptes(encl, vma->vma);
+	if (!atomic_read(&enclave->vma_cnt))
+		return;
 
-	while (!list_empty(&encl->vma_list)) {
-		vma = list_first_entry(&encl->vma_list, struct isgx_vma,
-					vma_list);
-		list_del(&vma->vma_list);
-		kfree(vma);
+	rb = rb_first(&enclave->enclave_rb);
+	while (rb) {
+		entry = container_of(rb, struct isgx_enclave_page, node);
+		rb = rb_next(rb);
+		if (entry->epc_page && (entry->flags & ISGX_ENCLAVE_PAGE_TCS)) {
+			vma = find_vma(enclave->mm, enclave->base);
+			if (vma) {
+				BUG_ON(vma->vm_private_data != NULL && vma->vm_private_data != enclave);
+				BUG_ON(vma->vm_ops != &isgx_vm_ops);
+
+				zap_vma_ptes(vma, entry->addr, PAGE_SIZE);
+			}
+		}
 	}
 }
 

@@ -211,7 +211,7 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 	struct isgx_enclave_page *entry;
 	struct isgx_enclave_page *tmp;
 	struct page *pages[ISGX_NR_SWAP_CLUSTER_MAX+1];
-	struct isgx_vma *evma;
+	struct vm_area_struct *vma;
 	int cnt = 0;
 	int i = 0;
 	int ret;
@@ -243,8 +243,8 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 
 	/* EBLOCK */
 	list_for_each_entry_safe(entry, tmp, src, load_list) {
-		evma = isgx_find_vma(enclave, entry->addr);
-		if (!evma) {
+		vma = isgx_find_vma(enclave, entry->addr);
+		if (!vma) {
 			list_del(&entry->load_list);
 			isgx_free_epc_page(entry->epc_page, enclave,
 					   ISGX_FREE_EREMOVE);
@@ -261,7 +261,7 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 			continue;
 		}
 
-		zap_vma_ptes(evma->vma, entry->addr, PAGE_SIZE);
+		zap_vma_ptes(vma, entry->addr, PAGE_SIZE);
 		do_eblock(entry->epc_page);
 		cnt++;
 	}
@@ -278,8 +278,8 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 		entry = list_first_entry(src, struct isgx_enclave_page, load_list);
 		list_del(&entry->load_list);
 
-		evma = isgx_find_vma(enclave, entry->addr);
-		if (evma) {
+		vma = isgx_find_vma(enclave, entry->addr);
+		if (vma) {
 			ret = do_ewb(enclave, entry, pages[i]);
 			BUG_ON(ret != 0 && ret != ISGX_NOT_TRACKED);
 			/* Only kick out threads with an IPI if needed. */
@@ -295,7 +295,7 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 					   ISGX_FREE_EREMOVE);
 		}
 
-		isgx_put_backing_page(pages[i++], evma != NULL);
+		isgx_put_backing_page(pages[i++], vma != NULL);
 
 		entry->epc_page = NULL;
 		entry->flags &= ~ISGX_ENCLAVE_PAGE_RESERVED;
