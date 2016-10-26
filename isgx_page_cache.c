@@ -30,6 +30,10 @@ static DECLARE_RWSEM(isgx_va_pages_sem);
 
 LIST_HEAD(isgx_tgid_ctx_list);
 DEFINE_MUTEX(isgx_tgid_ctx_mutex);
+
+static struct isgx_tgid_ctx *ctx_to_age = NULL;
+static struct isgx_tgid_ctx *ctx_to_iso = NULL;
+
 unsigned int isgx_nr_total_epc_pages;
 unsigned int isgx_nr_free_epc_pages;
 unsigned int isgx_nr_low_epc_pages = ISGX_NR_LOW_EPC_PAGES_DEFAULT;
@@ -37,115 +41,258 @@ unsigned int isgx_nr_high_epc_pages;
 struct task_struct *kisgxswapd_tsk;
 static DECLARE_WAIT_QUEUE_HEAD(kisgxswapd_waitq);
 
-static struct isgx_tgid_ctx *isolate_ctx(unsigned long nr_to_scan)
+/**
+ * isgx_page_cache_ctx_released() - Update trackers on context release.
+ * @ctx			Pointer to the context being released.
+ *
+ * If the context being released is either the next context to be aged
+ * or processed then update the tracker accordingly.  Leave the tracker
+ * invalid if the context is the last in the list; this is the easiest
+ * way to handle the scenario where the context is the last man standing.
+ * 
+ */
+void isgx_page_cache_ctx_released(struct isgx_tgid_ctx *ctx)
+{
+	if (ctx == ctx_to_age) {
+		if (list_is_last(&ctx_to_age->list, &isgx_tgid_ctx_list))
+			ctx_to_age = NULL;
+		else
+			ctx_to_age = list_next_entry(ctx_to_age, list);
+	}
+	if (ctx == ctx_to_iso) {
+		if (list_is_last(&ctx_to_iso->list, &isgx_tgid_ctx_list))
+			ctx_to_iso = NULL;
+		else
+			ctx_to_iso = list_next_entry(ctx_to_iso, list);
+	}
+}
+
+/**
+ * get_ctx_to_process() - Get the context whose turn it is to be aged/evicted.
+ * @next				  Pointer to the associated tracker, e.g. &ctx_to_age.
+ *
+ * Get the next context to age/evict and update the associated tracker.  Reset
+ * to the first context in the list if the tracker is invalid, e.g. the context
+ * was released and was the last entry in the list.  Returns the context to
+ * process, null if @isgx_tgid_ctx_list is empty.
+ * 
+ */
+static inline struct isgx_tgid_ctx *get_ctx_to_process(struct isgx_tgid_ctx **next)
 {
 	struct isgx_tgid_ctx *ctx;
-	int i;
 
-	for (i = 0, ctx = NULL; i < nr_to_scan; i++, ctx = NULL) {
-		schedule();
-
-		mutex_lock(&isgx_tgid_ctx_mutex);
-		if (list_empty(&isgx_tgid_ctx_list)) {
-			mutex_unlock(&isgx_tgid_ctx_mutex);
-			continue;
-		}
-
-		ctx = list_first_entry(&isgx_tgid_ctx_list,
-				       struct isgx_tgid_ctx,
-				       list);
-		list_move_tail(&ctx->list, &isgx_tgid_ctx_list);
-
-		if (kref_get_unless_zero(&ctx->refcount)) {
-			mutex_unlock(&isgx_tgid_ctx_mutex);
-			break;
-		}
-
-		mutex_unlock(&isgx_tgid_ctx_mutex);
-		kref_put(&ctx->refcount, release_tgid_ctx);
+	mutex_lock(&isgx_tgid_ctx_mutex);
+	
+	if (*next == NULL && !list_empty(&isgx_tgid_ctx_list))
+		*next = list_first_entry(&isgx_tgid_ctx_list, struct isgx_tgid_ctx, list);
+	
+	ctx = *next;
+	if (ctx && !kref_get_unless_zero(&ctx->refcount)) {
+		ctx = NULL;
 	}
+	if (*next)
+	{
+		if (list_is_last(&(*next)->list, &isgx_tgid_ctx_list))
+			*next = list_first_entry(&isgx_tgid_ctx_list, struct isgx_tgid_ctx, list);
+		else
+			*next = list_next_entry(*next, list);
+	}
+	
+	mutex_unlock(&isgx_tgid_ctx_mutex);
 
 	return ctx;
 }
 
-static struct isgx_enclave *isolate_enclave(unsigned long nr_to_scan)
+/**
+ * __age_epc_pages() - Age EPC for the 
+ *
+ */
+static inline int __age_epc_pages(struct isgx_enclave *encl)
 {
-	struct isgx_enclave *encl;
-	struct isgx_tgid_ctx *ctx;
-	int i;
-
-	ctx = isolate_ctx(nr_to_scan);
-	if (!ctx)
-		return NULL;
-
-	for (i = 0, encl = NULL; i < nr_to_scan; i++, encl = NULL) {
-		mutex_lock(&isgx_tgid_ctx_mutex);
-		if (list_empty(&ctx->enclave_list)) {
-			mutex_unlock(&isgx_tgid_ctx_mutex);
-			break;
-		}
-
-		encl = list_first_entry(&ctx->enclave_list, struct isgx_enclave,
-					enclave_list);
-		list_move_tail(&encl->enclave_list, &ctx->enclave_list);
-		if (kref_get_unless_zero(&encl->refcount)) {
-			mutex_unlock(&isgx_tgid_ctx_mutex);
-			break;
-		}
-
-		mutex_unlock(&isgx_tgid_ctx_mutex);
-	}
-
-	kref_put(&ctx->refcount, release_tgid_ctx);
-	return encl;
-}
-
-static void isolate_cluster(struct list_head *dst,
-			    unsigned long nr_to_scan)
-{
-	struct isgx_enclave *enclave;
+	int i, nr_to_scan = ISGX_NR_SWAP_CLUSTER_MAX;
 	struct isgx_enclave_page *entry;
-	int i;
 
-	enclave = isolate_enclave(nr_to_scan);
-	if (!enclave)
-		return;
+	LIST_HEAD(tmp);
+	LIST_HEAD(new);
+	LIST_HEAD(old);
 
-	if (!isgx_pin_mm(enclave)) {
-		kref_put(&enclave->refcount, isgx_enclave_release);
-		return;
+	for (i = 0; i < nr_to_scan && !list_empty(&encl->active_epc); i++) {
+		entry = list_first_entry(&encl->active_epc, struct isgx_enclave_page, epc_list);
+		if (!isgx_test_and_clear_young(entry)) {
+			entry->epc_age = -1;
+			list_move_tail(&entry->epc_list, &new);
+		} else {
+			list_move_tail(&entry->epc_list, &tmp);
+		}
 	}
 
-	for (i = 0; i < nr_to_scan; i++) {
-		mutex_lock(&enclave->lock);
-		if (list_empty(&enclave->load_list)) {
-			mutex_unlock(&enclave->lock);
-			break;
-		}
+	/* Splice the processed entries back onto the tail of the active list */
+	list_splice_tail_init(&tmp, &encl->active_epc);
 
-		entry = list_first_entry(&enclave->load_list,
-					 struct isgx_enclave_page,
-					 load_list);
-
-		if (!(entry->flags & ISGX_ENCLAVE_PAGE_RESERVED)) {
-			if (!isgx_test_and_clear_young(entry)) {
-				entry->flags |= ISGX_ENCLAVE_PAGE_RESERVED;
-				list_move_tail(&entry->load_list, dst);
-			} else {
-				list_move_tail(&entry->load_list, &enclave->load_list);
+	for (i = 0; i < nr_to_scan && !list_empty(&encl->inactive_epc); i++) {
+		entry = list_first_entry(&encl->inactive_epc, struct isgx_enclave_page, epc_list);
+		if (!isgx_test_and_clear_young(entry)) {
+			if (--entry->epc_age < -1) {
+				entry->epc_age = -1;
+				list_move_tail(&entry->epc_list, &old);
+			}
+			else {
+				list_move_tail(&entry->epc_list, &tmp);
 			}
 		} else {
-			list_move_tail(&entry->load_list, &enclave->load_list);
+			if (++entry->epc_age >= 1) {
+				entry->epc_age = 1;
+				list_move_tail(&entry->epc_list, &encl->active_epc);
+			}
+			else {
+				list_move_tail(&entry->epc_list, &tmp);
+			}
+		}
+	}
+
+	/* Splice the processed-but-not-old inactive pages onto the tail of
+	 * the inactive list, then splice the newly inactive pages onto the
+	 * tail, and finally, splice the old inactive pages (inactive for a
+	 * long time) onto the front of the list.  Using this approach, the
+	 * truly ancient pages will be evicted first, while the pages that
+	 * were just marked inactive will be evicted last.
+	 */
+	list_splice_tail(&tmp, &encl->inactive_epc);
+	list_splice_tail(&new, &encl->inactive_epc);
+	list_splice(&old, &encl->inactive_epc);
+
+	return 0;
+}
+
+static void age_epc_pages(int nr_to_age)
+{
+	int i, nr_aged = 0;
+	struct isgx_tgid_ctx *ctx;
+	struct isgx_enclave *encl;
+
+	for (i = 0; nr_aged < nr_to_age && i < atomic_read(&isgx_nr_pids); i++) {
+		ctx = get_ctx_to_process(&ctx_to_age);
+		if (!ctx)
+			break;
+			
+		mutex_lock(&ctx->lock);
+
+		if (!list_empty(&ctx->enclave_list)) {
+			list_for_each_entry(encl, &ctx->enclave_list, enclave_list) {
+				mutex_lock(&encl->lock);
+				if (isgx_pin_mm(encl)) {
+					nr_aged++;
+					__age_epc_pages(encl);
+					isgx_unpin_mm(encl);
+				} 
+				mutex_unlock(&encl->lock);
+			}
 		}
 
-		mutex_unlock(&enclave->lock);
+		mutex_unlock(&ctx->lock);
+
+		kref_put(&ctx->refcount, release_tgid_ctx);
+	}
+}
+
+static inline int __isolate_epc_pages(struct isgx_enclave *encl,
+							   struct list_head *evict_list,
+							   unsigned long nr_to_iso)
+{
+	int i, nr_isolated = 0, nr_to_scan = 2 * nr_to_iso;
+	struct isgx_enclave_page *entry, *start = NULL;
+
+	for (i = 0; i < nr_to_scan && nr_isolated < nr_to_iso; i++) {
+		if (list_empty(&encl->inactive_epc))
+			break;
+
+		entry = list_first_entry(&encl->inactive_epc, struct isgx_enclave_page, epc_list);
+		if (entry == start)
+			break;
+
+		if (!(entry->flags & ISGX_ENCLAVE_PAGE_RESERVED)) {
+			nr_isolated++;
+			entry->flags |= ISGX_ENCLAVE_PAGE_RESERVED;
+			list_move_tail(&entry->epc_list, evict_list);
+		} else {
+			list_move_tail(&entry->epc_list, &encl->inactive_epc);
+
+			if (!start)
+				start = entry;
+		}
 	}
 
-	isgx_unpin_mm(enclave);
-	if (list_empty(dst)) {
-		kref_put(&enclave->refcount, isgx_enclave_release);
-		return;
+	return nr_isolated;
+}
+
+static int isolate_epc_pages(struct list_head *evict_list, unsigned long nr_to_iso)
+{
+	int i, nr_isolated;
+	struct isgx_tgid_ctx *ctx;
+	struct isgx_enclave *encl, *start_encl;
+
+	for (i = 0; i < atomic_read(&isgx_nr_pids); i++) {
+		ctx = get_ctx_to_process(&ctx_to_iso);
+		if (!ctx)
+			break;
+
+		mutex_lock(&ctx->lock);
+
+		start_encl = NULL;
+
+		for ( ; ; ) {
+			if (list_empty(&ctx->enclave_list))
+				break;
+
+			encl = list_first_entry(&ctx->enclave_list, struct isgx_enclave, enclave_list);
+			if (encl == start_encl)
+				break;
+
+			if (!start_encl)
+				start_encl = encl;
+
+			list_move_tail(&encl->enclave_list, &ctx->enclave_list);
+
+			/* Do not get the enclave's refcount while holding the context's
+			 * lock, as invoking kref_put->isgx_enclave_release will cause
+			 * self-inflicted deadlock.  On the plus side, because we have
+			 * the context's lock it is safe to access the enclave without
+			 * incrementing its ref count. 
+			 */ 
+			mutex_lock(&encl->lock);
+
+			nr_isolated = __isolate_epc_pages(encl, evict_list, nr_to_iso);
+			if (!nr_isolated && isgx_pin_mm(encl)) {
+				__age_epc_pages(encl);
+				isgx_unpin_mm(encl);
+				
+				nr_isolated = __isolate_epc_pages(encl, evict_list, nr_to_iso);
+			}
+
+			mutex_unlock(&encl->lock);
+
+			/* If we isolated pages, then get a reference to the enclave,
+			 * as dropping the context's lock will allow the enclave to be
+			 * released.  Nuke the eviction list if the enclave is already
+			 * being released, but still return immediately, as removing an
+			 * enclave will have the same end result of freeing EPC pages.
+			 */
+			if (nr_isolated) {
+				if (!kref_get_unless_zero(&encl->refcount)) {
+					nr_isolated = 0;
+					list_del_init(evict_list);
+				}
+				mutex_unlock(&ctx->lock);
+				kref_put(&ctx->refcount, release_tgid_ctx);
+				goto done;
+			}
+		}
+
+		mutex_unlock(&ctx->lock);
+		kref_put(&ctx->refcount, release_tgid_ctx);
 	}
+done:
+	return nr_isolated;
 }
 
 static void isgx_ipi_cb(void *info)
@@ -205,7 +352,7 @@ static int do_ewb(struct isgx_enclave *enclave,
 }
 
 
-static void evict_cluster(struct list_head *src, unsigned int flags)
+static void evict_epc_pages(struct list_head *evict_list, unsigned int flags)
 {
 	struct isgx_enclave *enclave;
 	struct isgx_enclave_page *entry;
@@ -216,36 +363,36 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 	int i = 0;
 	int ret;
 
-	if (list_empty(src))
+	if (list_empty(evict_list))
 		return;
 
-	entry = list_first_entry(src, struct isgx_enclave_page, load_list);
+	entry = list_first_entry(evict_list, struct isgx_enclave_page, epc_list);
 	enclave = entry->enclave;
 
+	mutex_lock(&enclave->lock);
+
 	if (!isgx_pin_mm(enclave)) {
-		while (!list_empty(src)) {
-			entry = list_first_entry(src, struct isgx_enclave_page,
-						 load_list);
-			list_del(&entry->load_list);
-			mutex_lock(&enclave->lock);
+		while (!list_empty(evict_list)) {
+			entry = list_first_entry(evict_list, struct isgx_enclave_page,
+						 epc_list);
+			list_del(&entry->epc_list);
 			isgx_free_epc_page(entry->epc_page, enclave,
 					   ISGX_FREE_EREMOVE);
 			entry->epc_page = NULL;
 			entry->flags &= ~ISGX_ENCLAVE_PAGE_RESERVED;
-			mutex_unlock(&enclave->lock);
 		}
+
+		mutex_unlock(&enclave->lock);
 
 		kref_put(&enclave->refcount, isgx_enclave_release);
 		return;
 	}
 
-	mutex_lock(&enclave->lock);
-
 	/* EBLOCK */
-	list_for_each_entry_safe(entry, tmp, src, load_list) {
+	list_for_each_entry_safe(entry, tmp, evict_list, epc_list) {
 		vma = isgx_find_vma(enclave, entry->addr);
 		if (!vma) {
-			list_del(&entry->load_list);
+			list_del(&entry->epc_list);
 			isgx_free_epc_page(entry->epc_page, enclave,
 					   ISGX_FREE_EREMOVE);
 			entry->epc_page = NULL;
@@ -255,8 +402,8 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 
 		pages[cnt] = isgx_get_backing_page(enclave, entry, true);
 		if (IS_ERR((void *) pages[cnt])) {
-			list_del(&entry->load_list);
-			list_add_tail(&entry->load_list, &enclave->load_list);
+			list_del(&entry->epc_list);
+			list_add_tail(&entry->epc_list, &enclave->active_epc);
 			entry->flags &= ~ISGX_ENCLAVE_PAGE_RESERVED;
 			continue;
 		}
@@ -274,9 +421,9 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 
 	/* EWB */
 	i = 0;
-	while (!list_empty(src)) {
-		entry = list_first_entry(src, struct isgx_enclave_page, load_list);
-		list_del(&entry->load_list);
+	while (!list_empty(evict_list)) {
+		entry = list_first_entry(evict_list, struct isgx_enclave_page, epc_list);
+		list_del(&entry->epc_list);
 
 		vma = isgx_find_vma(enclave, entry->addr);
 		if (vma) {
@@ -323,34 +470,27 @@ static void evict_cluster(struct list_head *src, unsigned int flags)
 	BUG_ON(i != cnt);
 
 out:
-	mutex_unlock(&enclave->lock);
 	isgx_unpin_mm(enclave);
+	mutex_unlock(&enclave->lock);
 	kref_put(&enclave->refcount, isgx_enclave_release);
 }
 
 int kisgxswapd(void *p)
 {
-	LIST_HEAD(cluster);
+	LIST_HEAD(evict_list);
 	DEFINE_WAIT(wait);
-	unsigned int nr_free;
-	unsigned int nr_high;
 
 	for ( ; ; ) {
 		if (kthread_should_stop())
 			break;
 
-		spin_lock(&isgx_free_list_lock);
-		nr_free = isgx_nr_free_epc_pages;
-		nr_high = isgx_nr_high_epc_pages;
-		spin_unlock(&isgx_free_list_lock);
-
-
-		if (nr_free < nr_high) {
-			isolate_cluster(&cluster, ISGX_NR_SWAP_CLUSTER_MAX);
-			evict_cluster(&cluster, 0);
-
+		if (isgx_nr_free_epc_pages < isgx_nr_high_epc_pages) {
+			if (isolate_epc_pages(&evict_list, ISGX_NR_SWAP_CLUSTER_MAX))
+				evict_epc_pages(&evict_list, 0);
+			age_epc_pages(3);
 			schedule();
-		} else {
+		} 
+		else {
 			prepare_to_wait(&kisgxswapd_waitq,
 					&wait, TASK_INTERRUPTIBLE);
 
@@ -438,7 +578,7 @@ struct isgx_epc_page *isgx_alloc_epc_page(
 	struct isgx_tgid_ctx *tgid_epc_cnt,
 	unsigned int flags)
 {
-	LIST_HEAD(cluster);
+	LIST_HEAD(evict_list);
 	struct isgx_epc_page *entry;
 
 	for ( ; ; ) {
@@ -457,13 +597,13 @@ struct isgx_epc_page *isgx_alloc_epc_page(
 			break;
 		}
 
-		isolate_cluster(&cluster, ISGX_NR_SWAP_CLUSTER_MAX);
-		evict_cluster(&cluster, flags);
-
-		schedule();
+		if (isolate_epc_pages(&evict_list, ISGX_NR_SWAP_CLUSTER_MAX))
+			evict_epc_pages(&evict_list, flags);
+		else
+			schedule();
 	}
 
-	if (isgx_nr_free_epc_pages < isgx_nr_low_epc_pages)
+	if (isgx_nr_free_epc_pages < isgx_nr_high_epc_pages)
 		wake_up(&kisgxswapd_waitq);
 
 	return entry;
@@ -489,6 +629,15 @@ void isgx_free_epc_page(struct isgx_epc_page *entry,
 	list_add(&entry->free_list, &isgx_free_list);
 	isgx_nr_free_epc_pages++;
 	spin_unlock(&isgx_free_list_lock);
+}
+
+void isgx_activate_epc_page(struct isgx_enclave_page *page,
+						 	struct isgx_enclave *enclave)
+{
+	isgx_test_and_clear_young(page);
+
+	page->epc_age = 0;
+	list_add_tail(&page->epc_list, &enclave->active_epc);
 }
 
 /**

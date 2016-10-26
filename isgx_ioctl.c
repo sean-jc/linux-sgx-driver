@@ -70,26 +70,31 @@ static int add_tgid_ctx(struct isgx_enclave *enclave)
 
 	ctx->tgid = tgid;
 	kref_init(&ctx->refcount);
+	mutex_init(&ctx->lock);
 	INIT_LIST_HEAD(&ctx->enclave_list);
 
 	list_add(&ctx->list, &isgx_tgid_ctx_list);
 	atomic_inc(&isgx_nr_pids);
+	mutex_unlock(&isgx_tgid_ctx_mutex);
 
 	enclave->tgid_ctx = ctx;
 
-	mutex_unlock(&isgx_tgid_ctx_mutex);
 	return 0;
 }
 void release_tgid_ctx(struct kref *ref)
 {
-	struct isgx_tgid_ctx *pe =
+	struct isgx_tgid_ctx *ctx =
 		container_of(ref, struct isgx_tgid_ctx, refcount);
+	
 	mutex_lock(&isgx_tgid_ctx_mutex);
-	list_del(&pe->list);
-	atomic_dec(&isgx_nr_pids);
+	isgx_page_cache_ctx_released(ctx);
+	list_del(&ctx->list);
 	mutex_unlock(&isgx_tgid_ctx_mutex);
-	put_pid(pe->tgid);
-	kfree(pe);
+
+	atomic_dec(&isgx_nr_pids);
+
+	put_pid(ctx->tgid);
+	kfree(ctx);
 }
 static int enclave_rb_insert(struct rb_root *root,
 			     struct isgx_enclave_page *data)
@@ -286,7 +291,8 @@ static long isgx_ioctl_enclave_create(struct file *filep, unsigned int cmd,
 
 	kref_init(&enclave->refcount);
 	INIT_LIST_HEAD(&enclave->add_page_reqs);
-	INIT_LIST_HEAD(&enclave->load_list);
+	INIT_LIST_HEAD(&enclave->active_epc);
+	INIT_LIST_HEAD(&enclave->inactive_epc);
 	INIT_LIST_HEAD(&enclave->enclave_list);
 	mutex_init(&enclave->lock);
 	INIT_WORK(&enclave->add_page_work, isgx_add_page_worker);
@@ -340,9 +346,9 @@ static long isgx_ioctl_enclave_create(struct file *filep, unsigned int cmd,
 
 	ret = set_enclave(secs->base, enclave);
 
-	mutex_lock(&isgx_tgid_ctx_mutex);
+	mutex_lock(&enclave->tgid_ctx->lock);
 	list_add_tail(&enclave->enclave_list, &enclave->tgid_ctx->enclave_list);
-	mutex_unlock(&isgx_tgid_ctx_mutex);
+	mutex_unlock(&enclave->tgid_ctx->lock);
 out:
 	if (ret) {
 		vm_munmap(secs->base, secs->size);
@@ -446,8 +452,8 @@ static int __enclave_add_page(struct isgx_enclave *enclave,
 		return -EINVAL;
 	}
 
-	down_read(&enclave->mm->mmap_sem);
 	mutex_lock(&enclave->lock);
+	down_read(&enclave->mm->mmap_sem);
 
 	if (enclave->flags & ISGX_ENCLAVE_INITIALIZED) {
 		ret = -EINVAL;
@@ -486,12 +492,8 @@ static int __enclave_add_page(struct isgx_enclave *enclave,
 	empty = list_empty(&enclave->add_page_reqs);
 	kref_get(&enclave->refcount);
 	list_add_tail(&req->list, &enclave->add_page_reqs);
-	if (empty)
-		queue_work(isgx_add_page_wq, &enclave->add_page_work);
-
 	isgx_put_backing_page(backing_page, true /* write */);
 out:
-
 	if (ret) {
 		kfree(req);
 		isgx_free_va_slot(enclave_page->va_page,
@@ -499,9 +501,12 @@ out:
 	} else
 		BUG_ON(enclave_rb_insert(&enclave->enclave_rb, enclave_page));
 
-	mutex_unlock(&enclave->lock);
 	up_read(&enclave->mm->mmap_sem);
+	mutex_unlock(&enclave->lock);
 	__free_page(tmp_page);
+
+	if (!ret && empty)
+		queue_work(isgx_add_page_wq, &enclave->add_page_work);
 	return ret;
 }
 
@@ -764,12 +769,12 @@ static bool process_add_page_req(struct isgx_add_page_req *req)
 	if (IS_ERR(epc_page))
 		return false;
 
+	mutex_lock(&enclave->lock);
+
 	if (!isgx_pin_mm(enclave)) {
 		isgx_free_epc_page(epc_page, enclave, 0);
 		return false;
 	}
-
-	mutex_lock(&enclave->lock);
 
 	if (!atomic_read(&enclave->vma_cnt) ||
 	    isgx_find_enclave(enclave->mm, enclave_page->addr, &vma))
@@ -807,18 +812,16 @@ static bool process_add_page_req(struct isgx_add_page_req *req)
 		}
 	}
 
-	isgx_test_and_clear_young(enclave_page);
-
 	enclave_page->epc_page = epc_page;
-	list_add_tail(&enclave_page->load_list, &enclave->load_list);
+	isgx_activate_epc_page(enclave_page, enclave);
 
-	mutex_unlock(&enclave->lock);
 	isgx_unpin_mm(enclave);
+	mutex_unlock(&enclave->lock);
 	return true;
 out:
 	isgx_free_epc_page(epc_page, enclave, free_flags);
-	mutex_unlock(&enclave->lock);
 	isgx_unpin_mm(enclave);
+	mutex_unlock(&enclave->lock);
 	return false;
 }
 

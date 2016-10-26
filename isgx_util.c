@@ -353,19 +353,20 @@ void isgx_enclave_release(struct kref *ref)
 	struct isgx_enclave *enclave =
 		container_of(ref, struct isgx_enclave, refcount);
 
-	mutex_lock(&isgx_tgid_ctx_mutex);
-	if (!list_empty(&enclave->enclave_list))
-		list_del(&enclave->enclave_list);
-
-	mutex_unlock(&isgx_tgid_ctx_mutex);
-
+	if (enclave->tgid_ctx) {
+		mutex_lock(&enclave->tgid_ctx->lock);
+		if (!list_empty(&enclave->enclave_list))
+			list_del(&enclave->enclave_list);
+		mutex_unlock(&enclave->tgid_ctx->lock);
+	}
+		
 	rb1 = rb_first(&enclave->enclave_rb);
 	while (rb1) {
 		entry = container_of(rb1, struct isgx_enclave_page, node);
 		rb2 = rb_next(rb1);
 		rb_erase(rb1, &enclave->enclave_rb);
 		if (entry->epc_page) {
-			list_del(&entry->load_list);
+			list_del(&entry->epc_list);
 			isgx_free_epc_page(entry->epc_page, enclave,
 					   ISGX_FREE_EREMOVE);
 		}

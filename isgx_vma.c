@@ -207,7 +207,7 @@ static struct isgx_enclave_page *isgx_vma_do_fault(struct vm_area_struct *vma,
 	/* Do not free */
 	epc_page = NULL;
 
-	list_add_tail(&entry->load_list, &enclave->load_list);
+	isgx_activate_epc_page(entry, enclave);
 out:
 	mutex_unlock(&enclave->lock);
 	if (epc_page)

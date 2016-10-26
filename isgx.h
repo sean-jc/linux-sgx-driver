@@ -59,7 +59,8 @@ struct isgx_enclave_page {
 	unsigned long		addr;
 	unsigned int		flags;
 	struct isgx_epc_page	*epc_page;
-	struct list_head	load_list;
+	struct list_head	epc_list;
+	int 				epc_age;
 	struct isgx_enclave	*enclave;
 	struct isgx_va_page	*va_page;
 	unsigned int		va_offset;
@@ -76,6 +77,7 @@ struct isgx_tgid_ctx {
 	struct pid			*tgid;
 	atomic_t			epc_cnt;
 	struct kref			refcount;
+	struct mutex			lock;
 	struct list_head		enclave_list;
 	struct list_head		list;
 };
@@ -86,7 +88,8 @@ struct isgx_enclave {
 	struct mm_struct		*mm;
 	atomic_t			vma_cnt;
 	unsigned long			backing;
-	struct list_head		load_list;
+	struct list_head		active_epc;
+	struct list_head		inactive_epc;
 	struct kref			refcount;
 	struct mutex			lock;
 	unsigned long			base;
@@ -132,6 +135,8 @@ void isgx_dbg(struct isgx_enclave *enclave, const char *format, ...);
 void isgx_info(struct isgx_enclave *enclave, const char *format, ...);
 void isgx_warn(struct isgx_enclave *enclave, const char *format, ...);
 void isgx_err(struct isgx_enclave *enclave, const char *format, ...);
+void isgx_activate_epc_page(struct isgx_enclave_page *page,
+						 	struct isgx_enclave *enclave);
 void *isgx_get_epc_page(struct isgx_epc_page *entry);
 void isgx_put_epc_page(void *epc_page_vaddr);
 struct page *isgx_get_backing_page(struct isgx_enclave* enclave,
@@ -165,6 +170,7 @@ void release_tgid_ctx(struct kref *ref);
 
 extern struct mutex isgx_tgid_ctx_mutex;
 extern struct list_head isgx_tgid_ctx_list;
+
 extern unsigned int isgx_nr_total_epc_pages;
 extern unsigned int isgx_nr_free_epc_pages;
 extern unsigned int isgx_nr_low_epc_pages;
@@ -181,6 +187,7 @@ enum isgx_free_flags {
 int kisgxswapd(void *p);
 int isgx_page_cache_init(resource_size_t start, unsigned long size);
 void isgx_page_cache_teardown(void);
+void isgx_page_cache_ctx_released(struct isgx_tgid_ctx *ctx);
 struct isgx_epc_page *isgx_alloc_epc_page(
 	struct isgx_tgid_ctx *tgid_epc_cnt, unsigned int flags);
 void isgx_free_epc_page(struct isgx_epc_page *entry,
