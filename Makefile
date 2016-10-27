@@ -1,11 +1,11 @@
 ifneq ($(KERNELRELEASE),)
+	EXTRA_CFLAGS := -I$(src)/arch/x86/include
 	isgx-y := \
-		isgx_main.o \
-		isgx_page_cache.o \
-		isgx_ioctl.o \
-		isgx_vma.o \
-		isgx_util.o
-	isgx-$(CONFIG_COMPAT) += isgx_compat_ioctl.o
+		intel_sgx_main.o \
+		intel_sgx_page_cache.o \
+		intel_sgx_ioctl.o \
+		intel_sgx_vma.o \
+		intel_sgx_util.o
 	obj-m += isgx.o
 else
 KDIR := /lib/modules/$(shell uname -r)/build
