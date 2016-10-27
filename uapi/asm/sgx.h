@@ -103,20 +103,20 @@
 
 struct sgx_enclave_create  {
 	__u64	src;
-};
+} __attribute__((packed));
 
 struct sgx_enclave_add_page {
 	__u64	addr;
 	__u64	src;
 	__u64	secinfo;
 	__u16	mrmask;
-};
+} __attribute__((packed));
 
 struct sgx_enclave_init {
 	__u64	addr;
 	__u64	sigstruct;
 	__u64	einittoken;
-};
+} __attribute__((packed));
 
 struct sgx_enclave_destroy {
 	__u64	addr;
