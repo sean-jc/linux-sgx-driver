@@ -829,7 +829,10 @@ static int __sgx_encl_init(struct sgx_encl *encl, char *sigstruct,
 out:
 	if (ret) {
 		sgx_dbg(encl, "EINIT returned %d\n", ret);
-		ret = -EBUSY;
+		// if (ret == SGX_UNMASKED_EVENT)
+		// 	ret = -EBUSY;
+		// else
+		// 	ret = -EINVAL;
 	} else {
 		encl->flags |= SGX_ENCL_INITIALIZED;
 
