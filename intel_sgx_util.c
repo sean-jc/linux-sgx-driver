@@ -229,7 +229,6 @@ void sgx_encl_release(struct kref *ref)
 {
 	struct rb_node *rb1, *rb2;
 	struct sgx_encl_page *entry;
-	struct sgx_va_page *va_page;
 	struct sgx_encl *encl =
 		container_of(ref, struct sgx_encl, refcount);
 
@@ -248,20 +247,17 @@ void sgx_encl_release(struct kref *ref)
 			list_del(&entry->load_list);
 			sgx_free_page(entry->epc_page, encl, 0);
 		}
+		if (entry->va_page)
+			sgx_free_va_slot(entry->va_page, entry->va_offset);
+
 		kfree(entry);
 		rb1 = rb2;
 	}
 
-	while (!list_empty(&encl->va_pages)) {
-		va_page = list_first_entry(&encl->va_pages,
-					   struct sgx_va_page, list);
-		list_del(&va_page->list);
-		sgx_free_page(va_page->epc_page, encl, 0);
-		kfree(va_page);
-	}
-
 	if (encl->secs_page.epc_page)
 		sgx_free_page(encl->secs_page.epc_page, encl, 0);
+	if (encl->secs_page.va_page)
+		sgx_free_va_slot(encl->secs_page.va_page, encl->secs_page.va_offset);
 
 	encl->secs_page.epc_page = NULL;
 

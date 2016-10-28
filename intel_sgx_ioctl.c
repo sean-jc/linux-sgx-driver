@@ -405,67 +405,6 @@ static int sgx_validate_secs(const struct sgx_secs *secs)
 	return 0;
 }
 
-static int sgx_init_page(struct sgx_encl *encl,
-			 struct sgx_encl_page *entry,
-			 unsigned long addr)
-{
-	struct sgx_va_page *va_page;
-	struct sgx_epc_page *epc_page = NULL;
-	unsigned int va_offset = PAGE_SIZE;
-	void *vaddr;
-	int ret = 0;
-
-	list_for_each_entry(va_page, &encl->va_pages, list) {
-		va_offset = sgx_alloc_va_slot(va_page);
-		if (va_offset < PAGE_SIZE)
-			break;
-	}
-
-	if (va_offset == PAGE_SIZE) {
-		va_page = kzalloc(sizeof(*va_page), GFP_KERNEL);
-		if (!va_page)
-			return -ENOMEM;
-
-		epc_page = sgx_alloc_page(encl->tgid_ctx, 0);
-		if (IS_ERR(epc_page)) {
-			kfree(va_page);
-			return PTR_ERR(epc_page);
-		}
-
-		vaddr = sgx_get_epc_page(epc_page);
-		if (!vaddr) {
-			sgx_warn(encl, "kmap of a new VA page failed %d\n",
-				 ret);
-			sgx_free_page(epc_page, encl,
-					  SGX_FREE_SKIP_EREMOVE);
-			kfree(va_page);
-			return -EFAULT;
-		}
-
-		ret = __epa(vaddr);
-		sgx_put_epc_page(vaddr);
-
-		if (ret) {
-			sgx_warn(encl, "EPA returned %d\n", ret);
-			sgx_free_page(epc_page, encl,
-					  SGX_FREE_SKIP_EREMOVE);
-			kfree(va_page);
-			return -EFAULT;
-		}
-
-		va_page->epc_page = epc_page;
-		va_offset = sgx_alloc_va_slot(va_page);
-		list_add(&va_page->list, &encl->va_pages);
-	}
-
-	entry->encl = encl;
-	entry->va_page = va_page;
-	entry->va_offset = va_offset;
-	entry->addr = addr;
-
-	return 0;
-}
-
 /**
  * sgx_ioc_enclave_create - handler for SGX_IOC_ENCLAVE_CREATE
  *
@@ -526,7 +465,6 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 
 	kref_init(&encl->refcount);
 	INIT_LIST_HEAD(&encl->add_page_reqs);
-	INIT_LIST_HEAD(&encl->va_pages);
 	INIT_LIST_HEAD(&encl->vma_list);
 	INIT_LIST_HEAD(&encl->load_list);
 	INIT_LIST_HEAD(&encl->encl_list);
@@ -550,8 +488,11 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	if (ret)
 		goto out;
 
-	ret = sgx_init_page(encl, &encl->secs_page,
-			    encl->base + encl->size);
+
+	encl->secs_page.encl = encl;
+	encl->secs_page.addr = encl->base + encl->size;
+
+	ret = sgx_alloc_va_page(&encl->secs_page);
 	if (ret)
 		goto out;
 
@@ -679,7 +620,10 @@ static int __encl_add_page(struct sgx_encl *encl,
 		}
 	}
 
-	ret = sgx_init_page(encl, encl_page, addp->addr);
+	encl_page->encl = encl;
+	encl_page->addr = addp->addr;
+
+	ret = sgx_alloc_va_page(encl_page);
 	if (ret) {
 		__free_page(tmp_page);
 		return -EINVAL;

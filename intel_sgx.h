@@ -62,6 +62,7 @@
 
 #include <uapi/asm/sgx.h>
 #include <asm/sgx.h>
+#include <linux/atomic.h>
 #include <linux/kref.h>
 #include <linux/rbtree.h>
 #include <linux/rwsem.h>
@@ -81,25 +82,10 @@ struct sgx_epc_page {
 
 struct sgx_va_page {
 	struct sgx_epc_page *epc_page;
+	atomic_t used;
 	DECLARE_BITMAP(slots, SGX_VA_SLOT_COUNT);
 	struct list_head list;
 };
-
-static inline unsigned int sgx_alloc_va_slot(struct sgx_va_page *page)
-{
-	int slot = find_first_zero_bit(page->slots, SGX_VA_SLOT_COUNT);
-
-	if (slot < SGX_VA_SLOT_COUNT)
-		set_bit(slot, page->slots);
-
-	return slot << 3;
-}
-
-static inline void sgx_free_va_slot(struct sgx_va_page *page,
-				    unsigned int offset)
-{
-	clear_bit(offset >> 3, page->slots);
-}
 
 enum sgx_encl_page_flags {
 	SGX_ENCL_PAGE_TCS	= BIT(0),
@@ -150,7 +136,6 @@ struct sgx_encl {
 	struct kref refcount;
 	unsigned long base;
 	unsigned long size;
-	struct list_head va_pages;
 	struct rb_root encl_rb;
 	struct list_head add_page_reqs;
 	struct work_struct add_page_work;
@@ -247,5 +232,54 @@ struct sgx_epc_page *sgx_alloc_page(struct sgx_tgid_ctx *tgid_epc_cnt,
 void sgx_free_page(struct sgx_epc_page *entry,
 		   struct sgx_encl *encl,
 		   unsigned int flags);
+int sgx_alloc_va_page(struct sgx_encl_page *encl_page);
+void sgx_free_va_page(struct sgx_va_page *page);
+
+/**
+ * sgx_alloc_va_slot() - allocate VA slot from a VA page
+ *
+ * @page: VA page
+ *
+ * Returns offset to a free VA slot. If there are no free slots, an offset of
+ * PAGE_SIZE is returned.
+ */
+static inline unsigned int sgx_alloc_va_slot(struct sgx_va_page *page)
+{
+	int slot;
+	if (atomic_read(&page->used) == SGX_VA_SLOT_COUNT)
+		return SGX_VA_SLOT_COUNT << 3;
+
+	for ( ; ; ) {
+		/* Races for free slots are allowed, someone may have claimed the last
+		 * free slot, hence a graceful return instead of a BUG().
+		 */
+		slot = find_first_zero_bit(page->slots, SGX_VA_SLOT_COUNT);
+		if (slot == SGX_VA_SLOT_COUNT)
+			break;
+
+		if (!test_and_set_bit_lock(slot, page->slots)) {
+			atomic_inc(&page->used);
+			break;
+		}
+	}
+	return slot << 3;
+}
+
+/**
+ * sgx_free_va_slot() - free VA slot from a VA page
+ *
+ * @page:	VA page
+ * @offset:	the offset of the VA slot
+ *
+ * Releases VA slot and frees the entire VA page if all slots were freed.
+ */
+static inline void sgx_free_va_slot(struct sgx_va_page *page,
+				     unsigned int offset)
+{
+	clear_bit(offset >> 3, page->slots);
+
+	if (atomic_dec_and_test(&page->used))
+		sgx_free_va_page(page);
+}
 
 #endif /* __ARCH_X86_INTEL_SGX_H__ */
