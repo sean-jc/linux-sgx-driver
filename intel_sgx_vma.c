@@ -71,7 +71,6 @@
 static void sgx_vma_open(struct vm_area_struct *vma)
 {
 	struct sgx_encl *encl;
-	struct sgx_vma *evma;
 
 	/* Was vm_private_data nullified as a result of the previous fork? */
 	encl = vma->vm_private_data;
@@ -81,26 +80,11 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 	/* Was the process forked? mm_struct changes when the process is
 	 * forked.
 	 */
-	mutex_lock(&encl->lock);
-	evma = list_first_entry(&encl->vma_list,
-				struct sgx_vma, vma_list);
-	if (evma->vma->vm_mm != vma->vm_mm) {
-		mutex_unlock(&encl->lock);
+	if (!encl->mm || encl->mm != vma->vm_mm) {
 		goto out_fork;
 	}
-	mutex_unlock(&encl->lock);
 
-	mutex_lock(&encl->lock);
-	if (!list_empty(&encl->vma_list)) {
-		evma = kzalloc(sizeof(*evma), GFP_KERNEL);
-		if (!evma) {
-			sgx_invalidate(encl);
-		} else {
-			evma->vma = vma;
-			list_add_tail(&evma->vma_list, &encl->vma_list);
-		}
-	}
-	mutex_unlock(&encl->lock);
+	atomic_inc(&encl->vma_cnt);
 
 	kref_get(&encl->refcount);
 	return;
@@ -112,7 +96,6 @@ out_fork:
 static void sgx_vma_close(struct vm_area_struct *vma)
 {
 	struct sgx_encl *encl = vma->vm_private_data;
-	struct sgx_vma *evma;
 
 	/* If process was forked, VMA is still there but
 	 * vm_private_data is set to NULL.
@@ -120,25 +103,10 @@ static void sgx_vma_close(struct vm_area_struct *vma)
 	if (!encl)
 		return;
 
-	mutex_lock(&encl->lock);
-
-	/* On vma_close() we remove the vma from vma_list
-	 * there is a possibility that evma is not found
-	 * in case vma_open() has failed on memory allocation
-	 * and vma list has then been emptied
-	 */
-	evma = sgx_find_vma(encl, vma->vm_start);
-	if (evma) {
-		list_del(&evma->vma_list);
-		kfree(evma);
-	}
+	atomic_dec(&encl->vma_cnt);
 
 	vma->vm_private_data = NULL;
-
-	sgx_zap_tcs_ptes(encl, vma);
 	zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
-
-	mutex_unlock(&encl->lock);
 
 	kref_put(&encl->refcount, sgx_encl_release);
 }
@@ -220,7 +188,7 @@ static struct sgx_encl_page *sgx_vma_do_fault(struct vm_area_struct *vma,
 
 	mutex_lock(&encl->lock);
 
-	if (list_empty(&encl->vma_list)) {
+	if (!atomic_read(&encl->vma_cnt)) {
 		entry = ERR_PTR(-EFAULT);
 		goto out;
 	}

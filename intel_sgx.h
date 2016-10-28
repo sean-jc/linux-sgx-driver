@@ -104,11 +104,6 @@ struct sgx_encl_page {
 	struct rb_node node;
 };
 
-struct sgx_vma {
-	struct vm_area_struct *vma;
-	struct list_head vma_list;
-};
-
 struct sgx_tgid_ctx {
 	struct pid *tgid;
 	atomic_t epc_cnt;
@@ -131,9 +126,9 @@ struct sgx_encl {
 	struct task_struct *owner;
 	struct mm_struct *mm;
 	struct file *backing;
-	struct list_head vma_list;
 	struct list_head load_list;
 	struct kref refcount;
+	atomic_t vma_cnt;
 	unsigned long base;
 	unsigned long size;
 	struct rb_root encl_rb;
@@ -193,10 +188,8 @@ void sgx_insert_pte(struct sgx_encl *encl,
 		    struct sgx_epc_page *epc_page,
 		    struct vm_area_struct *vma);
 int sgx_eremove(struct sgx_epc_page *epc_page);
-struct sgx_vma *sgx_find_vma(struct sgx_encl *encl,
+struct vm_area_struct *sgx_find_vma(struct sgx_encl *encl,
 			     unsigned long addr);
-void sgx_zap_tcs_ptes(struct sgx_encl *encl,
-		      struct vm_area_struct *vma);
 bool sgx_pin_mm(struct sgx_encl *encl);
 void sgx_unpin_mm(struct sgx_encl *encl);
 void sgx_invalidate(struct sgx_encl *encl);

@@ -255,7 +255,7 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 
 	mutex_lock(&encl->lock);
 
-	if (list_empty(&encl->vma_list) ||
+	if (!atomic_read(&encl->vma_cnt) ||
 	    sgx_find_encl(encl->mm, encl_page->addr, &vma))
 		goto out;
 
@@ -420,7 +420,6 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	struct sgx_secs *secs = NULL;
 	struct sgx_epc_page *secs_epc;
 	struct vm_area_struct *vma;
-	struct sgx_vma *evma;
 	void *secs_vaddr = NULL;
 	struct file *backing;
 	long ret;
@@ -465,7 +464,6 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 
 	kref_init(&encl->refcount);
 	INIT_LIST_HEAD(&encl->add_page_reqs);
-	INIT_LIST_HEAD(&encl->vma_list);
 	INIT_LIST_HEAD(&encl->load_list);
 	INIT_LIST_HEAD(&encl->encl_list);
 	mutex_init(&encl->lock);
@@ -519,13 +517,7 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	if (secs->flags & SGX_SECS_A_DEBUG)
 		encl->flags |= SGX_ENCL_DEBUG;
 
-	evma = kzalloc(sizeof(*evma), GFP_KERNEL);
-	if (!evma) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	evma->vma = vma;
-	list_add_tail(&evma->vma_list, &encl->vma_list);
+	atomic_inc(&encl->vma_cnt);
 	vma->vm_private_data = encl;
 
 	mutex_lock(&sgx_tgid_ctx_mutex);

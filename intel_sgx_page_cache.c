@@ -249,7 +249,7 @@ static void sgx_write_pages(struct list_head *src)
 	struct sgx_encl_page *entry;
 	struct sgx_encl_page *tmp;
 	struct page *pages[SGX_NR_SWAP_CLUSTER_MAX + 1];
-	struct sgx_vma *evma;
+	struct vm_area_struct *vma;
 	int cnt = 0;
 	int i = 0;
 	int ret;
@@ -277,8 +277,8 @@ static void sgx_write_pages(struct list_head *src)
 
 	/* EBLOCK */
 	list_for_each_entry_safe(entry, tmp, src, load_list) {
-		evma = sgx_find_vma(encl, entry->addr);
-		if (!evma) {
+		vma = sgx_find_vma(encl, entry->addr);
+		if (!vma) {
 			list_del(&entry->load_list);
 			sgx_free_encl_page(entry, encl, 0);
 			continue;
@@ -292,7 +292,7 @@ static void sgx_write_pages(struct list_head *src)
 			continue;
 		}
 
-		zap_vma_ptes(evma->vma, entry->addr, PAGE_SIZE);
+		zap_vma_ptes(vma, entry->addr, PAGE_SIZE);
 		sgx_eblock(entry->epc_page);
 		cnt++;
 	}
@@ -310,8 +310,8 @@ static void sgx_write_pages(struct list_head *src)
 					 load_list);
 		list_del(&entry->load_list);
 
-		evma = sgx_find_vma(encl, entry->addr);
-		if (evma) {
+		vma = sgx_find_vma(encl, entry->addr);
+		if (vma) {
 			ret = sgx_ewb(encl, entry, pages[i]);
 			BUG_ON(ret != 0 && ret != SGX_NOT_TRACKED);
 			/* Only kick out threads with an IPI if needed. */
@@ -323,8 +323,8 @@ static void sgx_write_pages(struct list_head *src)
 		}
 
 		sgx_free_encl_page(entry, encl,
-				      evma ? SGX_FREE_SKIP_EREMOVE : 0);
-		sgx_put_backing(pages[i++], evma);
+				      vma ? SGX_FREE_SKIP_EREMOVE : 0);
+		sgx_put_backing(pages[i++], vma);
 	}
 
 	/* Allow SECS page eviction only when the encl is initialized. */

@@ -105,35 +105,21 @@ void sgx_put_backing(struct page *backing_page, bool write)
 	put_page(backing_page);
 }
 
-struct sgx_vma *sgx_find_vma(struct sgx_encl *encl,
-			     unsigned long addr)
+/**
+ * sgx_find_vma() - find VMA for the enclave address
+ * @enclave:	the enclave to be searched
+ * @addr:		the linear address to query
+ *
+ * Finds VMA for the given address of the enclave. Returns the VMA if
+ * there is one containing the given address.
+ */
+struct vm_area_struct *sgx_find_vma(struct sgx_encl *encl,
+			       unsigned long addr)
 {
-	struct sgx_vma *tmp;
-	struct sgx_vma *evma;
-
-	list_for_each_entry_safe(evma, tmp, &encl->vma_list, vma_list) {
-		if (evma->vma->vm_start <= addr && evma->vma->vm_end > addr)
-			return evma;
-	}
-
-	sgx_dbg(encl, "cannot find VMA at 0x%lx\n", addr);
-	return NULL;
-}
-
-void sgx_zap_tcs_ptes(struct sgx_encl *encl, struct vm_area_struct *vma)
-{
-	struct sgx_encl_page *entry;
-	struct rb_node *rb;
-
-	rb = rb_first(&encl->encl_rb);
-	while (rb) {
-		entry = container_of(rb, struct sgx_encl_page, node);
-		rb = rb_next(rb);
-		if (entry->epc_page && (entry->flags & SGX_ENCL_PAGE_TCS) &&
-		    entry->addr >= vma->vm_start &&
-		    entry->addr < vma->vm_end)
-			zap_vma_ptes(vma, entry->addr, PAGE_SIZE);
-	}
+	struct vm_area_struct *vma = find_vma(encl->mm, addr);
+	if (!vma)
+		sgx_dbg(encl, "cannot find VMA at 0x%lx\n", addr);
+	return vma;
 }
 
 bool sgx_pin_mm(struct sgx_encl *encl)
@@ -141,18 +127,13 @@ bool sgx_pin_mm(struct sgx_encl *encl)
 	if (encl->flags & SGX_ENCL_SUSPEND)
 		return false;
 
-	mutex_lock(&encl->lock);
-	if (!list_empty(&encl->vma_list)) {
-		atomic_inc(&encl->mm->mm_count);
-	} else {
-		mutex_unlock(&encl->lock);
+	if (!atomic_read(&encl->vma_cnt))
 		return false;
-	}
-	mutex_unlock(&encl->lock);
 
+	atomic_inc(&encl->mm->mm_count);
 	down_read(&encl->mm->mmap_sem);
 
-	if (list_empty(&encl->vma_list)) {
+	if (!atomic_read(&encl->vma_cnt)) {
 		sgx_unpin_mm(encl);
 		return false;
 	}
@@ -168,17 +149,26 @@ void sgx_unpin_mm(struct sgx_encl *encl)
 
 void sgx_invalidate(struct sgx_encl *encl)
 {
-	struct sgx_vma *vma;
+	struct vm_area_struct *vma;
+	struct sgx_encl_page *page;
+	struct rb_node *rb;
 
-	list_for_each_entry(vma, &encl->vma_list, vma_list)
-		sgx_zap_tcs_ptes(encl, vma->vma);
+	if (!atomic_read(&encl->vma_cnt))
+		return;
 
-	while (!list_empty(&encl->vma_list)) {
-		vma = list_first_entry(&encl->vma_list, struct sgx_vma,
-				       vma_list);
-		list_del(&vma->vma_list);
-		kfree(vma);
+	rb = rb_first(&encl->encl_rb);
+	while (rb) {
+		page = container_of(rb, struct sgx_encl_page, node);
+		rb = rb_next(rb);
+		if (page->epc_page && (page->flags & SGX_ENCL_PAGE_TCS)) {
+			vma = find_vma(encl->mm, encl->base);
+			if (vma) {
+				zap_vma_ptes(vma, page->addr, PAGE_SIZE);
+			}
+		}
 	}
+
+	atomic_set(&encl->vma_cnt, 0);
 }
 
 int sgx_find_encl(struct mm_struct *mm, unsigned long addr,
