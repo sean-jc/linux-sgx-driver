@@ -273,15 +273,14 @@ static void sgx_write_pages(struct list_head *src)
 		return;
 	}
 
-	/* EBLOCK */
+	mutex_lock(&encl->lock);
 
+	/* EBLOCK */
 	list_for_each_entry_safe(entry, tmp, src, load_list) {
-		mutex_lock(&encl->lock);
 		evma = sgx_find_vma(encl, entry->addr);
 		if (!evma) {
 			list_del(&entry->load_list);
 			sgx_free_encl_page(entry, encl, 0);
-			mutex_unlock(&encl->lock);
 			continue;
 		}
 
@@ -290,27 +289,22 @@ static void sgx_write_pages(struct list_head *src)
 			list_del(&entry->load_list);
 			list_add_tail(&entry->load_list, &encl->load_list);
 			entry->flags &= ~SGX_ENCL_PAGE_RESERVED;
-			mutex_unlock(&encl->lock);
 			continue;
 		}
 
 		zap_vma_ptes(evma->vma, entry->addr, PAGE_SIZE);
 		sgx_eblock(entry->epc_page);
 		cnt++;
-		mutex_unlock(&encl->lock);
 	}
 
-	/* ETRACK */
+	if (!cnt)
+		goto out;
 
-	mutex_lock(&encl->lock);
+	/* ETRACK */
 	sgx_etrack(encl->secs_page.epc_page);
-	mutex_unlock(&encl->lock);
 
 	/* EWB */
-
-	mutex_lock(&encl->lock);
 	i = 0;
-
 	while (!list_empty(src)) {
 		entry = list_first_entry(src, struct sgx_encl_page,
 					 load_list);
@@ -349,6 +343,7 @@ static void sgx_write_pages(struct list_head *src)
 		}
 	}
 
+out:
 	mutex_unlock(&encl->lock);
 
 	sgx_unpin_mm(encl);
