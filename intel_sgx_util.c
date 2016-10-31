@@ -122,6 +122,18 @@ struct vm_area_struct *sgx_find_vma(struct sgx_encl *encl,
 	return vma;
 }
 
+/**
+ * sgx_pin_mm() - "pin" a mm_struct to prevent it from being freed
+ * @encl:		the enclave to be pinned
+ *
+ * Pin an enclave's associated mm_struct by incrementing its count
+ * and acquiring its semaphore for read.  Note that "pinning" here
+ * does not refer to page pinning, e.g. preventing a page from being
+ * remapped, done by the kernel
+ *
+ * The caller MUST hold a reference to the enclave!  If you can't
+ * get a reference then you should be using down_read() directly.
+ */
 bool sgx_pin_mm(struct sgx_encl *encl)
 {
 	if (encl->flags & SGX_ENCL_SUSPEND)
@@ -224,18 +236,21 @@ struct sgx_encl_page *sgx_encl_find_page(struct sgx_encl *encl,
 	return NULL;
 }
 
-void sgx_encl_release(struct kref *ref)
+static void __sgx_encl_release(struct kref *ref, bool ctx_locked)
 {
 	struct rb_node *rb1, *rb2;
 	struct sgx_encl_page *entry;
 	struct sgx_encl *encl =
 		container_of(ref, struct sgx_encl, refcount);
 
-	mutex_lock(&sgx_tgid_ctx_mutex);
-	if (!list_empty(&encl->encl_list))
-		list_del(&encl->encl_list);
-
-	mutex_unlock(&sgx_tgid_ctx_mutex);
+	if (encl->tgid_ctx) {
+		if (!ctx_locked)
+			mutex_lock(&encl->tgid_ctx->lock);
+		if (!list_empty(&encl->encl_list))
+			list_del(&encl->encl_list);
+		if (!ctx_locked)
+			mutex_unlock(&encl->tgid_ctx->lock);
+	}
 
 	rb1 = rb_first(&encl->encl_rb);
 	while (rb1) {
@@ -243,7 +258,7 @@ void sgx_encl_release(struct kref *ref)
 		rb2 = rb_next(rb1);
 		rb_erase(rb1, &encl->encl_rb);
 		if (entry->epc_page) {
-			list_del(&entry->load_list);
+			list_del(&entry->epc_list);
 			sgx_free_page(entry->epc_page, encl, 0);
 		}
 		if (entry->va_page)
@@ -267,4 +282,14 @@ void sgx_encl_release(struct kref *ref)
 		fput(encl->backing);
 
 	kfree(encl);
+}
+
+void sgx_encl_release(struct kref *ref)
+{
+	__sgx_encl_release(ref, false);
+}
+
+void sgx_encl_release_ctx_locked(struct kref *ref)
+{
+	__sgx_encl_release(ref, true);
 }

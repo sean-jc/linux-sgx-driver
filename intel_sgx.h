@@ -95,8 +95,9 @@ enum sgx_encl_page_flags {
 struct sgx_encl_page {
 	unsigned long addr;
 	unsigned int flags;
+	int epc_age;
 	struct sgx_epc_page *epc_page;
-	struct list_head load_list;
+	struct list_head	epc_list;
 	struct sgx_encl *encl;
 	struct sgx_va_page *va_page;
 	unsigned int va_offset;
@@ -108,6 +109,7 @@ struct sgx_tgid_ctx {
 	struct pid *tgid;
 	atomic_t epc_cnt;
 	struct kref refcount;
+	struct mutex lock;
 	struct list_head encl_list;
 	struct list_head list;
 };
@@ -120,13 +122,13 @@ enum sgx_encl_flags {
 };
 
 struct sgx_encl {
-	/* the encl lock */
 	struct mutex lock;
 	unsigned int flags;
 	struct task_struct *owner;
 	struct mm_struct *mm;
 	struct file *backing;
-	struct list_head load_list;
+	struct list_head active_epc;
+	struct list_head inactive_epc;
 	struct kref refcount;
 	atomic_t vma_cnt;
 	unsigned long base;
@@ -177,7 +179,8 @@ long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg);
 #endif
 
 /* Utility functions */
-
+void sgx_activate_epc_page(struct sgx_encl_page *page,
+			   struct sgx_encl *encl);
 void *sgx_get_epc_page(struct sgx_epc_page *entry);
 void sgx_put_epc_page(void *epc_page_vaddr);
 struct page *sgx_get_backing(struct sgx_encl *encl,
@@ -198,6 +201,7 @@ int sgx_find_encl(struct mm_struct *mm, unsigned long addr,
 struct sgx_encl_page *sgx_encl_find_page(struct sgx_encl *encl,
 					 unsigned long addr);
 void sgx_encl_release(struct kref *ref);
+void sgx_encl_release_ctx_locked(struct kref *ref);
 void sgx_tgid_ctx_release(struct kref *ref);
 
 /* EPC page cache */
@@ -220,6 +224,7 @@ enum sgx_free_flags {
 int kisgxswapd(void *p);
 int sgx_page_cache_init(resource_size_t start, unsigned long size);
 void sgx_page_cache_teardown(void);
+void sgx_page_cache_ctx_released(struct sgx_tgid_ctx *ctx);
 struct sgx_epc_page *sgx_alloc_page(struct sgx_tgid_ctx *tgid_epc_cnt,
 				    unsigned int flags);
 void sgx_free_page(struct sgx_epc_page *entry,

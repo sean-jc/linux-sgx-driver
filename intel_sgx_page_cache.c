@@ -73,6 +73,10 @@ static DECLARE_RWSEM(sgx_va_pages_sem);
 
 LIST_HEAD(sgx_tgid_ctx_list);
 DEFINE_MUTEX(sgx_tgid_ctx_mutex);
+
+static struct sgx_tgid_ctx *ctx_to_age = NULL;
+static struct sgx_tgid_ctx *ctx_to_iso = NULL;
+
 static unsigned int sgx_nr_total_epc_pages;
 static unsigned int sgx_nr_free_pages;
 static unsigned int sgx_nr_low_pages = SGX_NR_LOW_EPC_PAGES_DEFAULT;
@@ -80,35 +84,59 @@ static unsigned int sgx_nr_high_pages;
 struct task_struct *kisgxswapd_tsk;
 static DECLARE_WAIT_QUEUE_HEAD(kisgxswapd_waitq);
 
-static struct sgx_tgid_ctx *sgx_isolate_tgid_ctx(unsigned long nr_to_scan)
+/**
+ * sgx_page_cache_ctx_released() - Update trackers on context release.
+ * @ctx			Pointer to the context being released.
+ *
+ * If the context being released is either the next context to be aged
+ * or processed then update the tracker accordingly.  Leave the tracker
+ * invalid if the context is the last in the list; this is the easiest
+ * way to handle the scenario where the context is the last man standing.
+ */
+void sgx_page_cache_ctx_released(struct sgx_tgid_ctx *ctx)
 {
-	struct sgx_tgid_ctx *ctx = NULL;
-	int i;
+	if (ctx == ctx_to_age) {
+		if (list_is_last(&ctx_to_age->list, &sgx_tgid_ctx_list))
+			ctx_to_age = NULL;
+		else
+			ctx_to_age = list_next_entry(ctx_to_age, list);
+	}
+	if (ctx == ctx_to_iso) {
+		if (list_is_last(&ctx_to_iso->list, &sgx_tgid_ctx_list))
+			ctx_to_iso = NULL;
+		else
+			ctx_to_iso = list_next_entry(ctx_to_iso, list);
+	}
+}
+
+
+/**
+ * sgx_get_ctx_to_process() - Get the next context be aged/evicted.
+ * @next		Pointer to the associated tracker, e.g. &ctx_to_age.
+ *
+ * Get the next context to age/evict and update the associated tracker.
+ * Reset to the first context in the list if the tracker is invalid,
+ * e.g. the context was released and was the last entry in the list.
+ * Returns the context to process, null if @sgx_tgid_ctx_list is empty.
+ */
+static inline struct sgx_tgid_ctx *sgx_get_ctx_to_process(struct sgx_tgid_ctx **next)
+{
+	struct sgx_tgid_ctx *ctx;
 
 	mutex_lock(&sgx_tgid_ctx_mutex);
 
-	if (list_empty(&sgx_tgid_ctx_list)) {
-		mutex_unlock(&sgx_tgid_ctx_mutex);
-		return NULL;
-	}
+	if (*next == NULL && !list_empty(&sgx_tgid_ctx_list))
+		*next = list_first_entry(&sgx_tgid_ctx_list, struct sgx_tgid_ctx, list);
 
-	for (i = 0; i < nr_to_scan; i++) {
-		/* Peek TGID context from the head. */
-		ctx = list_first_entry(&sgx_tgid_ctx_list,
-				       struct sgx_tgid_ctx,
-				       list);
-
-		/* Move to the tail so that we do not encounter it in the
-		 * next iteration.
-		 */
-		list_move_tail(&ctx->list, &sgx_tgid_ctx_list);
-
-		/* Non-empty TGID context? */
-		if (!list_empty(&ctx->encl_list) &&
-		    kref_get_unless_zero(&ctx->refcount))
-			break;
-
+	ctx = *next;
+	if (ctx && !kref_get_unless_zero(&ctx->refcount)) {
 		ctx = NULL;
+	}
+	if (*next) {
+		if (list_is_last(&(*next)->list, &sgx_tgid_ctx_list))
+			*next = list_first_entry(&sgx_tgid_ctx_list, struct sgx_tgid_ctx, list);
+		else
+			*next = list_next_entry(*next, list);
 	}
 
 	mutex_unlock(&sgx_tgid_ctx_mutex);
@@ -116,68 +144,243 @@ static struct sgx_tgid_ctx *sgx_isolate_tgid_ctx(unsigned long nr_to_scan)
 	return ctx;
 }
 
-static struct sgx_encl *sgx_isolate_encl(struct sgx_tgid_ctx *ctx,
-					       unsigned long nr_to_scan)
+static int sgx_test_and_clear_young_cb(pte_t *ptep, pgtable_t token,
+				       unsigned long addr, void *data)
 {
-	struct sgx_encl *encl = NULL;
-	int i;
-
-	mutex_lock(&sgx_tgid_ctx_mutex);
-
-	if (list_empty(&ctx->encl_list)) {
-		mutex_unlock(&sgx_tgid_ctx_mutex);
-		return NULL;
+	int ret = pte_young(*ptep);
+	if (ret) {
+		pte_t pte = pte_mkold(*ptep);
+		set_pte_at((struct mm_struct *) data, addr, ptep, pte);
 	}
-
-	for (i = 0; i < nr_to_scan; i++) {
-		/* Peek encl from the head. */
-		encl = list_first_entry(&ctx->encl_list, struct sgx_encl,
-					encl_list);
-
-		/* Move to the tail so that we do not encounter it in the
-		 * next iteration.
-		 */
-		list_move_tail(&encl->encl_list, &ctx->encl_list);
-
-		/* Enclave with faulted pages?  */
-		if (!list_empty(&encl->load_list) &&
-		    kref_get_unless_zero(&encl->refcount))
-			break;
-
-		encl = NULL;
-	}
-
-	mutex_unlock(&sgx_tgid_ctx_mutex);
-
-	return encl;
+	return ret;
 }
 
-static void sgx_isolate_pages(struct sgx_encl *encl,
-			      struct list_head *dst,
-			      unsigned long nr_to_scan)
+/**
+ * sgx_test_and_clear_young() - Test and reset the accessed bit
+ * @page:	enclave page to be tested for recent access
+ *
+ * Checks the Access (A) bit from the PTE corresponding to the
+ * enclave page and clears it.  Returns 1 if the page has been
+ * recently accessed and 0 if not.
+ */
+static int sgx_test_and_clear_young(struct sgx_encl_page *page)
 {
-	struct sgx_encl_page *entry;
-	int i;
+	struct vm_area_struct *vma = sgx_find_vma(page->encl, page->addr);
+	if (!vma)
+		return 0;
+
+	return apply_to_page_range(vma->vm_mm, page->addr, PAGE_SIZE,
+				   sgx_test_and_clear_young_cb, vma->vm_mm);
+}
+
+/**
+ * __sgx_reserve_encl() - Helper func for page aging and isolation
+ * @encl		- The enclave to reserve
+ *
+ * Gets a reference to the enclave (if its not already zero),
+ * acquires the enclave's mmap_sem for read, and acquires the
+ * enclaves lock.  Returns true if all of the above succeed,
+ * false otherwise.
+ *
+ * Caller MUST hold the enclave's context's lock.
+ */
+static inline bool __sgx_reserve_encl(struct sgx_encl *encl)
+{
+	WARN_ON(!encl->tgid_ctx || !mutex_is_locked(&encl->tgid_ctx->lock));
+
+	if (!kref_get_unless_zero(&encl->refcount))
+		return false;
+
+	if (!sgx_pin_mm(encl)) {
+		kref_put(&encl->refcount, sgx_encl_release_ctx_locked);
+		return false;
+	}
 
 	mutex_lock(&encl->lock);
+	return true;
+}
 
-	for (i = 0; i < nr_to_scan; i++) {
-		if (list_empty(&encl->load_list))
-			break;
+/**
+ * __sgx_unreserve_encl() - Unwinds __sgx_reserve_encl
+ * @encl		- The enclave to unreserve
+ * @put_ref		- If true, kref_put is called, else kref is kept
+ *
+ * Caller MUST hold the enclave's context's lock.
+ */
+static inline void __sgx_unreserve_encl(struct sgx_encl *encl, bool put_ref)
+{
+	WARN_ON(!encl->tgid_ctx || !mutex_is_locked(&encl->tgid_ctx->lock));
 
-		entry = list_first_entry(&encl->load_list,
-					 struct sgx_encl_page,
-					 load_list);
+	mutex_unlock(&encl->lock);
+	sgx_unpin_mm(encl);
 
-		if (!(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
-			entry->flags |= SGX_ENCL_PAGE_RESERVED;
-			list_move_tail(&entry->load_list, dst);
+	/* Note the usage of sgx_encl_release_ctx_locked, which is
+	 * required as we are holding the context's lock.
+	 */
+	if (put_ref)
+		kref_put(&encl->refcount, sgx_encl_release_ctx_locked);
+}
+
+/**
+ * __sgx_age_pages() - Age EPC pages for a single enclave
+ * @encl		Enclave whose pages are to be aged
+ */
+static void __sgx_age_pages(struct sgx_encl *encl)
+{
+	int i, nr_to_scan = SGX_NR_SWAP_CLUSTER_MAX;
+	struct sgx_encl_page *entry;
+
+	LIST_HEAD(tmp);
+	LIST_HEAD(new);
+	LIST_HEAD(old);
+
+	for (i = 0; i < nr_to_scan && !list_empty(&encl->active_epc); i++) {
+		entry = list_first_entry(&encl->active_epc, struct sgx_encl_page, epc_list);
+		if (!sgx_test_and_clear_young(entry)) {
+			entry->epc_age = -1;
+			list_move_tail(&entry->epc_list, &new);
 		} else {
-			list_move_tail(&entry->load_list, &encl->load_list);
+			list_move_tail(&entry->epc_list, &tmp);
 		}
 	}
 
-	mutex_unlock(&encl->lock);
+	/* Splice the processed entries back onto the tail of the active list */
+	list_splice_tail_init(&tmp, &encl->active_epc);
+
+	for (i = 0; i < nr_to_scan && !list_empty(&encl->inactive_epc); i++) {
+		entry = list_first_entry(&encl->inactive_epc, struct sgx_encl_page, epc_list);
+		if (!sgx_test_and_clear_young(entry)) {
+			if (--entry->epc_age < -1) {
+				entry->epc_age = -1;
+				list_move_tail(&entry->epc_list, &old);
+			}
+			else {
+				list_move_tail(&entry->epc_list, &tmp);
+			}
+		} else {
+			if (++entry->epc_age >= 1) {
+				entry->epc_age = 1;
+				list_move_tail(&entry->epc_list, &encl->active_epc);
+			}
+			else {
+				list_move_tail(&entry->epc_list, &tmp);
+			}
+		}
+	}
+
+	/* Splice the processed-but-not-old inactive pages onto the tail of
+	 * the inactive list, then splice the newly inactive pages onto the
+	 * tail, and finally, splice the old inactive pages (inactive for a
+	 * long time) onto the front of the list.  Using this approach, the
+	 * truly ancient pages will be evicted first, while the pages that
+	 * were just marked inactive will be evicted last.
+	 */
+	list_splice_tail(&tmp, &encl->inactive_epc);
+	list_splice_tail(&new, &encl->inactive_epc);
+	list_splice(&old, &encl->inactive_epc);
+}
+
+static void sgx_age_pages(int nr_to_age)
+{
+	int i, nr_aged = 0;
+	struct sgx_tgid_ctx *ctx;
+	struct sgx_encl *encl, *tmp;
+
+	for (i = 0; nr_aged < nr_to_age && i < atomic_read(&sgx_nr_pids); i++) {
+		ctx = sgx_get_ctx_to_process(&ctx_to_age);
+		if (!ctx)
+			break;
+
+		mutex_lock(&ctx->lock);
+
+		if (!list_empty(&ctx->encl_list)) {
+			list_for_each_entry_safe(encl, tmp, &ctx->encl_list, encl_list) {
+				if (__sgx_reserve_encl(encl)) {
+					__sgx_age_pages(encl);
+					nr_aged++;
+					__sgx_unreserve_encl(encl, true);
+				}
+			}
+		}
+
+		mutex_unlock(&ctx->lock);
+
+		kref_put(&ctx->refcount, sgx_tgid_ctx_release);
+	}
+}
+
+static inline int __sgx_isolate_pages(struct sgx_encl *encl,
+	struct list_head *swap_list,
+	unsigned long nr_to_iso)
+{
+	int i, nr_isolated = 0, nr_to_scan = 2 * nr_to_iso;
+	struct sgx_encl_page *entry, *start = NULL;
+
+	for (i = 0; i < nr_to_scan && nr_isolated < nr_to_iso; i++) {
+		if (list_empty(&encl->inactive_epc))
+			break;
+
+		entry = list_first_entry(&encl->inactive_epc, struct sgx_encl_page, epc_list);
+		if (entry == start)
+			break;
+
+		if (!(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
+			nr_isolated++;
+			entry->flags |= SGX_ENCL_PAGE_RESERVED;
+			list_move_tail(&entry->epc_list, swap_list);
+		} else {
+			list_move_tail(&entry->epc_list, &encl->inactive_epc);
+
+			if (!start)
+				start = entry;
+		}
+	}
+
+	return nr_isolated;
+}
+
+static int sgx_isolate_pages(struct list_head *swap_list,
+				 unsigned long nr_to_iso)
+{
+	int i, nr_isolated = 0;
+	struct sgx_tgid_ctx *ctx;
+	struct sgx_encl *encl, *tmp;
+
+	for (i = 0; !nr_isolated && i < atomic_read(&sgx_nr_pids); i++) {
+		ctx = sgx_get_ctx_to_process(&ctx_to_iso);
+		if (!ctx)
+			break;
+
+		mutex_lock(&ctx->lock);
+
+		if (!list_empty(&ctx->encl_list)) {
+			list_for_each_entry_safe(encl, tmp, &ctx->encl_list, encl_list) {
+				if (__sgx_reserve_encl(encl)) {
+					nr_isolated = __sgx_isolate_pages(encl, swap_list, nr_to_iso);
+					if (!nr_isolated) {
+						__sgx_age_pages(encl);
+						nr_isolated = __sgx_isolate_pages(encl, swap_list, nr_to_iso);
+					}
+
+					/* If we isolated pages, then keep a reference to the chosen
+					 * enclave, move the enclave to the end of the list and exit
+					 * the loop so we can begin swapping.  If we couldn't iso any
+					 * pages then drop the reference to the enclave and continue
+					 * with the next loop iteration.
+					 */
+					__sgx_unreserve_encl(encl, !nr_isolated);
+					if (nr_isolated) {
+						list_move_tail(&encl->encl_list, &ctx->encl_list);
+						break;
+					}
+				}
+			}
+		}
+
+		mutex_unlock(&ctx->lock);
+		kref_put(&ctx->refcount, sgx_tgid_ctx_release);
+	}
+	return nr_isolated;
 }
 
 static void sgx_ipi_cb(void *info)
@@ -235,15 +438,15 @@ static int sgx_ewb(struct sgx_encl *encl,
 }
 
 void sgx_free_encl_page(struct sgx_encl_page *entry,
-		    struct sgx_encl *encl,
-		    unsigned int flags)
+		        struct sgx_encl *encl,
+		        unsigned int flags)
 {
 	sgx_free_page(entry->epc_page, encl, flags);
 	entry->epc_page = NULL;
 	entry->flags &= ~SGX_ENCL_PAGE_RESERVED;
 }
 
-static void sgx_write_pages(struct list_head *src)
+static void sgx_write_pages(struct list_head *swap_list)
 {
 	struct sgx_encl *encl;
 	struct sgx_encl_page *entry;
@@ -254,40 +457,38 @@ static void sgx_write_pages(struct list_head *src)
 	int i = 0;
 	int ret;
 
-	if (list_empty(src))
-		return;
+	BUG_ON(list_empty(swap_list));
 
-	entry = list_first_entry(src, struct sgx_encl_page, load_list);
+	entry = list_first_entry(swap_list, struct sgx_encl_page, epc_list);
 	encl = entry->encl;
 
 	if (!sgx_pin_mm(encl)) {
-		while (!list_empty(src)) {
-			entry = list_first_entry(src, struct sgx_encl_page,
-						 load_list);
-			list_del(&entry->load_list);
-			mutex_lock(&encl->lock);
+		mutex_lock(&encl->lock);
+		while (!list_empty(swap_list)) {
+			entry = list_first_entry(swap_list, struct sgx_encl_page, epc_list);
+			list_del(&entry->epc_list);
 			sgx_free_encl_page(entry, encl, 0);
-			mutex_unlock(&encl->lock);
 		}
-
+		mutex_unlock(&encl->lock);
+		kref_put(&encl->refcount, sgx_encl_release);
 		return;
 	}
 
 	mutex_lock(&encl->lock);
 
 	/* EBLOCK */
-	list_for_each_entry_safe(entry, tmp, src, load_list) {
+	list_for_each_entry_safe(entry, tmp, swap_list, epc_list) {
 		vma = sgx_find_vma(encl, entry->addr);
 		if (!vma) {
-			list_del(&entry->load_list);
+			list_del(&entry->epc_list);
 			sgx_free_encl_page(entry, encl, 0);
 			continue;
 		}
 
 		pages[cnt] = sgx_get_backing(encl, entry);
 		if (IS_ERR(pages[cnt])) {
-			list_del(&entry->load_list);
-			list_add_tail(&entry->load_list, &encl->load_list);
+			list_del(&entry->epc_list);
+			list_add_tail(&entry->epc_list, &encl->active_epc);
 			entry->flags &= ~SGX_ENCL_PAGE_RESERVED;
 			continue;
 		}
@@ -305,10 +506,10 @@ static void sgx_write_pages(struct list_head *src)
 
 	/* EWB */
 	i = 0;
-	while (!list_empty(src)) {
-		entry = list_first_entry(src, struct sgx_encl_page,
-					 load_list);
-		list_del(&entry->load_list);
+	while (!list_empty(swap_list)) {
+		entry = list_first_entry(swap_list, struct sgx_encl_page,
+					 epc_list);
+		list_del(&entry->epc_list);
 
 		vma = sgx_find_vma(encl, entry->addr);
 		if (vma) {
@@ -345,49 +546,32 @@ static void sgx_write_pages(struct list_head *src)
 
 out:
 	mutex_unlock(&encl->lock);
-
 	sgx_unpin_mm(encl);
+	kref_put(&encl->refcount, sgx_encl_release);
 }
 
-static void sgx_swap_pages(unsigned long nr_to_scan)
+static int sgx_swap_pages(unsigned long nr_to_swap)
 {
-	struct sgx_tgid_ctx *ctx;
-	struct sgx_encl *encl;
-	LIST_HEAD(cluster);
+	LIST_HEAD(swap_list);
 
-	ctx = sgx_isolate_tgid_ctx(nr_to_scan);
-	if (!ctx)
-		return;
-
-	encl = sgx_isolate_encl(ctx, nr_to_scan);
-	if (!encl)
-		goto out;
-
-	sgx_isolate_pages(encl, &cluster, nr_to_scan);
-	sgx_write_pages(&cluster);
-
-	kref_put(&encl->refcount, sgx_encl_release);
-out:
-	kref_put(&ctx->refcount, sgx_tgid_ctx_release);
+	int nr_isolated = sgx_isolate_pages(&swap_list, nr_to_swap);
+	if (nr_isolated) {
+		sgx_write_pages(&swap_list);
+	}
+	return nr_isolated;
 }
 
 int kisgxswapd(void *p)
 {
 	DEFINE_WAIT(wait);
-	unsigned int nr_free;
-	unsigned int nr_high;
 
 	for ( ; ; ) {
 		if (kthread_should_stop())
 			break;
 
-		spin_lock(&sgx_free_list_lock);
-		nr_free = sgx_nr_free_pages;
-		nr_high = sgx_nr_high_pages;
-		spin_unlock(&sgx_free_list_lock);
-
-		if (nr_free < nr_high) {
+		if (sgx_nr_free_pages < sgx_nr_high_pages) {
 			sgx_swap_pages(SGX_NR_SWAP_CLUSTER_MAX);
+			sgx_age_pages(3);
 			schedule();
 		} else {
 			prepare_to_wait(&kisgxswapd_waitq,
@@ -501,11 +685,11 @@ struct sgx_epc_page *sgx_alloc_page(struct sgx_tgid_ctx *ctx,
 			break;
 		}
 
-		sgx_swap_pages(SGX_NR_SWAP_CLUSTER_MAX);
-		schedule();
+		if (!sgx_swap_pages(SGX_NR_SWAP_CLUSTER_MAX))
+			schedule();
 	}
 
-	if (sgx_nr_free_pages < sgx_nr_low_pages)
+	if (sgx_nr_free_pages < sgx_nr_high_pages)
 		wake_up(&kisgxswapd_waitq);
 
 	return entry;
@@ -546,6 +730,15 @@ void sgx_free_page(struct sgx_epc_page *entry,
 	list_add(&entry->free_list, &sgx_free_list);
 	sgx_nr_free_pages++;
 	spin_unlock(&sgx_free_list_lock);
+}
+
+void sgx_activate_epc_page(struct sgx_encl_page *page,
+		struct sgx_encl *encl)
+{
+	sgx_test_and_clear_young(page);
+
+	page->epc_age = 0;
+	list_add_tail(&page->epc_list, &encl->active_epc);
 }
 
 /**

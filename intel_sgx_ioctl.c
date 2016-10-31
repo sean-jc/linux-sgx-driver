@@ -115,6 +115,7 @@ static int sgx_add_to_tgid_ctx(struct sgx_encl *encl)
 
 	ctx->tgid = tgid;
 	kref_init(&ctx->refcount);
+	mutex_init(&ctx->lock);
 	INIT_LIST_HEAD(&ctx->encl_list);
 
 	list_add(&ctx->list, &sgx_tgid_ctx_list);
@@ -128,14 +129,15 @@ static int sgx_add_to_tgid_ctx(struct sgx_encl *encl)
 
 void sgx_tgid_ctx_release(struct kref *ref)
 {
-	struct sgx_tgid_ctx *pe =
+	struct sgx_tgid_ctx *ctx =
 		container_of(ref, struct sgx_tgid_ctx, refcount);
 	mutex_lock(&sgx_tgid_ctx_mutex);
-	list_del(&pe->list);
+	sgx_page_cache_ctx_released(ctx);
+	list_del(&ctx->list);
 	atomic_dec(&sgx_nr_pids);
 	mutex_unlock(&sgx_tgid_ctx_mutex);
-	put_pid(pe->tgid);
-	kfree(pe);
+	put_pid(ctx->tgid);
+	kfree(ctx);
 }
 
 static int encl_rb_insert(struct rb_root *root,
@@ -288,7 +290,7 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 	}
 
 	encl_page->epc_page = epc_page;
-	list_add_tail(&encl_page->load_list, &encl->load_list);
+	sgx_activate_epc_page(encl_page, encl);
 
 	mutex_unlock(&encl->lock);
 	sgx_unpin_mm(encl);
@@ -458,7 +460,8 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 
 	kref_init(&encl->refcount);
 	INIT_LIST_HEAD(&encl->add_page_reqs);
-	INIT_LIST_HEAD(&encl->load_list);
+	INIT_LIST_HEAD(&encl->active_epc);
+	INIT_LIST_HEAD(&encl->inactive_epc);
 	INIT_LIST_HEAD(&encl->encl_list);
 	mutex_init(&encl->lock);
 	INIT_WORK(&encl->add_page_work, sgx_add_page_worker);
@@ -514,9 +517,9 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	atomic_inc(&encl->vma_cnt);
 	vma->vm_private_data = encl;
 
-	mutex_lock(&sgx_tgid_ctx_mutex);
+	mutex_lock(&encl->tgid_ctx->lock);
 	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
-	mutex_unlock(&sgx_tgid_ctx_mutex);
+	mutex_unlock(&encl->tgid_ctx->lock);
 out:
 	if (ret && encl)
 		kref_put(&encl->refcount, sgx_encl_release);
@@ -656,12 +659,10 @@ static int __encl_add_page(struct sgx_encl *encl,
 	empty = list_empty(&encl->add_page_reqs);
 	kref_get(&encl->refcount);
 	list_add_tail(&req->list, &encl->add_page_reqs);
-	if (empty)
-		queue_work(sgx_add_page_wq, &encl->add_page_work);
 
 	sgx_put_backing(backing, true /* write */);
-out:
 
+out:
 	if (ret) {
 		kfree(req);
 		sgx_free_va_slot(encl_page->va_page,
@@ -673,6 +674,16 @@ out:
 
 	mutex_unlock(&encl->lock);
 	__free_page(tmp_page);
+
+	/* queue_work acquires a spin lock of its own, wait until we have
+	 * unlocked the enclave before invoking queue_work.  There is no
+	 * deadlock concern, but rather we don't want to hold the enclave
+	 * lock any longer than necessary, i.e. while we're spinning on the
+	 * workqueue's lock.
+	 */
+	if (!ret && empty)
+		queue_work(sgx_add_page_wq, &encl->add_page_work);
+
 	return ret;
 }
 

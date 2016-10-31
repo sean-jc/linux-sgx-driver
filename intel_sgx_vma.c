@@ -80,9 +80,8 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 	/* Was the process forked? mm_struct changes when the process is
 	 * forked.
 	 */
-	if (!encl->mm || encl->mm != vma->vm_mm) {
+	if (!encl->mm || encl->mm != vma->vm_mm)
 		goto out_fork;
-	}
 
 	atomic_inc(&encl->vma_cnt);
 
@@ -264,7 +263,7 @@ static struct sgx_encl_page *sgx_vma_do_fault(struct vm_area_struct *vma,
 	/* Do not free */
 	epc_page = NULL;
 
-	list_add_tail(&entry->load_list, &encl->load_list);
+	sgx_activate_epc_page(entry, encl);
 out:
 	mutex_unlock(&encl->lock);
 	if (encl->flags & SGX_ENCL_SUSPEND)
