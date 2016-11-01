@@ -179,13 +179,6 @@ static struct sgx_encl_page *sgx_vma_do_fault(struct vm_area_struct *vma,
 		/* reinterpret the type as we return an error */
 		return (struct sgx_encl_page *)epc_page;
 
-	secs_epc_page = sgx_alloc_page(encl->tgid_ctx, SGX_ALLOC_ATOMIC);
-	if (IS_ERR(secs_epc_page)) {
-		sgx_free_page(epc_page, encl, SGX_FREE_SKIP_EREMOVE);
-		/* reinterpret the type as we return an error */
-		return (struct sgx_encl_page *)secs_epc_page;
-	}
-
 	mutex_lock(&encl->lock);
 
 	if (!atomic_read(&encl->vma_cnt)) {
@@ -215,6 +208,18 @@ static struct sgx_encl_page *sgx_vma_do_fault(struct vm_area_struct *vma,
 
 	/* If SECS is evicted then reload it first */
 	if (encl->flags & SGX_ENCL_SECS_EVICTED) {
+		/* Note that calling sgx_alloc_page while holding encl->lock is
+		 * normally illegal as it leads to deadlocks, but is ok in this
+		 * case as SGX_ALLOC_ATOMIC will prevent sgx_alloc_page from
+		 * going into the problematic flows.
+		 */
+		secs_epc_page = sgx_alloc_page(encl->tgid_ctx, SGX_ALLOC_ATOMIC);
+		if (IS_ERR(secs_epc_page)) {
+			entry = (void *)secs_epc_page;
+			secs_epc_page = NULL;
+			goto out;
+		}
+
 		backing = sgx_get_backing(encl, &encl->secs_page);
 		if (IS_ERR(backing)) {
 			entry = (void *)backing;
