@@ -263,12 +263,6 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 	if (IS_ERR(backing))
 		goto out;
 
-	/* Do not race with do_exit() */
-	if (!atomic_read(&encl->mm->mm_users)) {
-		sgx_put_backing(backing, 0);
-		goto out;
-	}
-
 	ret = vm_insert_pfn(vma, encl_page->addr, PFN_DOWN(epc_page->pa));
 	if (ret)
 		goto out;

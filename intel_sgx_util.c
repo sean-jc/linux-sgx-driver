@@ -133,7 +133,16 @@ bool sgx_pin_mm(struct sgx_encl *encl)
 	atomic_inc(&encl->mm->mm_count);
 	down_read(&encl->mm->mmap_sem);
 
-	if (!atomic_read(&encl->vma_cnt)) {
+	/* Check both vma_cnt and mm_users after acquiring mmap_sem
+	 * to avoid racing with the owning process exiting.  mm_users
+	 * needs to be checked as do_exit->exit_mmap tears down VMAs
+	 * and PTEs without holding any MM locks (once mm_users==0).
+	 * mm_count only guarantees the MM's kernel objects will not
+	 * be freed, it doesn't protect the VMAs or PTEs.  Allowing
+	 * EPC page eviction to race with the PTEs being dismantled
+	 * can result in PTEs being left in use when the MM is freed.
+	 */
+	if (!atomic_read(&encl->vma_cnt) || !atomic_read(&encl->mm->mm_users)) {
 		sgx_unpin_mm(encl);
 		return false;
 	}
