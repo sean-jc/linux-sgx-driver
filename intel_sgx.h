@@ -213,6 +213,7 @@ int sgx_find_encl(struct mm_struct *mm, unsigned long addr,
 struct sgx_encl_page *sgx_encl_find_page(struct sgx_encl *encl,
 					 unsigned long addr);
 void sgx_encl_release(struct kref *ref);
+void sgx_encl_release_ctx_locked(struct kref *ref);
 void sgx_tgid_ctx_release(struct kref *ref);
 
 /* EPC page cache */

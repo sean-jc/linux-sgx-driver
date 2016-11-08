@@ -224,7 +224,7 @@ struct sgx_encl_page *sgx_encl_find_page(struct sgx_encl *encl,
 	return NULL;
 }
 
-void sgx_encl_release(struct kref *ref)
+static void __sgx_encl_release(struct kref *ref, bool ctx_locked)
 {
 	struct rb_node *rb1, *rb2;
 	struct sgx_encl_page *entry;
@@ -233,10 +233,12 @@ void sgx_encl_release(struct kref *ref)
 		container_of(ref, struct sgx_encl, refcount);
 
 	if (encl->tgid_ctx) {
-		mutex_lock(&encl->tgid_ctx->lock);
+		if (!ctx_locked)
+			mutex_lock(&encl->tgid_ctx->lock);
 		if (!list_empty(&encl->encl_list))
 			list_del(&encl->encl_list);
-		mutex_unlock(&encl->tgid_ctx->lock);
+		if (!ctx_locked)
+			mutex_unlock(&encl->tgid_ctx->lock);
 	}
 
 	rb1 = rb_first(&encl->encl_rb);
@@ -272,4 +274,14 @@ void sgx_encl_release(struct kref *ref)
 		fput(encl->backing);
 
 	kfree(encl);
+}
+
+void sgx_encl_release(struct kref *ref)
+{
+	__sgx_encl_release(ref, false);
+}
+
+void sgx_encl_release_ctx_locked(struct kref *ref)
+{
+	__sgx_encl_release(ref, true);
 }

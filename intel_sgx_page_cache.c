@@ -113,6 +113,55 @@ void sgx_activate_epc_page(struct sgx_encl_page *page, struct sgx_encl *encl)
 	list_add_tail(&page->load_list, &encl->load_list);
 }
 
+
+/**
+ * __sgx_reserve_encl() - Helper func for page aging and isolation
+ * @encl		- The enclave to reserve
+ *
+ * Gets a reference to the enclave (if its not already zero),
+ * acquires the enclave's mmap_sem for read, and acquires the
+ * enclaves lock.  Returns true if all of the above succeed,
+ * false otherwise.
+ *
+ * Caller MUST hold the enclave's context's lock.
+ */
+static inline bool __sgx_reserve_encl(struct sgx_encl *encl)
+{
+	WARN_ON(!encl->tgid_ctx || !mutex_is_locked(&encl->tgid_ctx->lock));
+
+	if (!kref_get_unless_zero(&encl->refcount))
+		return false;
+
+	if (!sgx_pin_mm(encl)) {
+		kref_put(&encl->refcount, sgx_encl_release_ctx_locked);
+		return false;
+	}
+
+	mutex_lock(&encl->lock);
+	return true;
+}
+
+/**
+ * __sgx_unreserve_encl() - Unwinds __sgx_reserve_encl
+ * @encl		- The enclave to unreserve
+ * @put_ref		- If true, kref_put is called, else kref is kept
+ *
+ * Caller MUST hold the enclave's context's lock.
+ */
+static inline void __sgx_unreserve_encl(struct sgx_encl *encl, bool put_ref)
+{
+	WARN_ON(!encl->tgid_ctx || !mutex_is_locked(&encl->tgid_ctx->lock));
+
+	mutex_unlock(&encl->lock);
+	sgx_unpin_mm(encl);
+
+	/* Note the usage of sgx_encl_release_ctx_locked, which is
+	 * required as we are holding the context's lock.
+	 */
+	if (put_ref)
+		kref_put(&encl->refcount, sgx_encl_release_ctx_locked);
+}
+
 static struct sgx_tgid_ctx *sgx_isolate_tgid_ctx(unsigned long nr_to_scan)
 {
 	struct sgx_tgid_ctx *ctx = NULL;
@@ -147,50 +196,12 @@ static struct sgx_tgid_ctx *sgx_isolate_tgid_ctx(unsigned long nr_to_scan)
 	return ctx;
 }
 
-static struct sgx_encl *sgx_isolate_encl(struct sgx_tgid_ctx *ctx,
-					       unsigned long nr_to_scan)
+static inline int __sgx_isolate_pages(struct sgx_encl *encl,
+				      struct list_head *swap_list,
+				      unsigned long nr_to_scan)
 {
-	struct sgx_encl *encl = NULL;
-	int i;
-
-	mutex_lock(&ctx->lock);
-
-	if (list_empty(&ctx->encl_list)) {
-		mutex_unlock(&ctx->lock);
-		return NULL;
-	}
-
-	for (i = 0; i < nr_to_scan; i++) {
-		/* Peek encl from the head. */
-		encl = list_first_entry(&ctx->encl_list, struct sgx_encl,
-					encl_list);
-
-		/* Move to the tail so that we do not encounter it in the
-		 * next iteration.
-		 */
-		list_move_tail(&encl->encl_list, &ctx->encl_list);
-
-		/* Enclave with faulted pages?  */
-		if (!list_empty(&encl->load_list) &&
-		    kref_get_unless_zero(&encl->refcount))
-			break;
-
-		encl = NULL;
-	}
-
-	mutex_unlock(&ctx->lock);
-
-	return encl;
-}
-
-static void sgx_isolate_pages(struct sgx_encl *encl,
-			      struct list_head *swap_list,
-			      unsigned long nr_to_scan)
-{
+	int i, nr_isolated = 0;
 	struct sgx_encl_page *entry;
-	int i;
-
-	mutex_lock(&encl->lock);
 
 	for (i = 0; i < nr_to_scan; i++) {
 		if (list_empty(&encl->load_list))
@@ -202,6 +213,7 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 
 		if (!sgx_test_and_clear_young(entry, encl) &&
 			!(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
+			nr_isolated++;
 			entry->flags |= SGX_ENCL_PAGE_RESERVED;
 			list_move_tail(&entry->load_list, swap_list);
 		} else {
@@ -209,7 +221,44 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 		}
 	}
 
-	mutex_unlock(&encl->lock);
+	return nr_isolated;
+}
+
+
+static int sgx_isolate_pages(struct sgx_tgid_ctx *ctx,
+			     struct list_head *swap_list,
+			     struct sgx_encl **iso_encl,
+			     unsigned long nr_to_scan)
+{
+	int nr_isolated = 0;
+	struct sgx_encl *encl, *tmp;
+
+	mutex_lock(&ctx->lock);
+
+	if (!list_empty(&ctx->encl_list)) {
+		list_for_each_entry_safe(encl, tmp, &ctx->encl_list, encl_list) {
+			if (__sgx_reserve_encl(encl)) {
+				nr_isolated = __sgx_isolate_pages(encl, swap_list, nr_to_scan);
+
+				/* If we isolated pages, then keep a reference to the chosen
+				 * enclave, move the enclave to the end of the list and exit
+				 * the loop so we can begin swapping.  If we couldn't iso any
+				 * pages then drop the reference to the enclave and continue
+				 * with the next loop iteration.
+				 */
+				__sgx_unreserve_encl(encl, !nr_isolated);
+				if (nr_isolated) {
+					*iso_encl = encl;
+					list_move_tail(&encl->encl_list, &ctx->encl_list);
+					break;
+				}
+			}
+		}
+	}
+
+	mutex_unlock(&ctx->lock);
+
+	return nr_isolated;
 }
 
 static void sgx_ipi_cb(void *info)
@@ -386,15 +435,11 @@ static void sgx_swap_pages(unsigned long nr_to_scan)
 	if (!ctx)
 		return;
 
-	encl = sgx_isolate_encl(ctx, nr_to_scan);
-	if (!encl)
-		goto out;
+	if (sgx_isolate_pages(ctx, &swap_list, &encl, nr_to_scan)) {
+		sgx_write_pages(encl, &swap_list);
+		kref_put(&encl->refcount, sgx_encl_release);
+	}
 
-	sgx_isolate_pages(encl, &swap_list, nr_to_scan);
-	sgx_write_pages(encl, &swap_list);
-
-	kref_put(&encl->refcount, sgx_encl_release);
-out:
 	kref_put(&ctx->refcount, sgx_tgid_ctx_release);
 }
 
