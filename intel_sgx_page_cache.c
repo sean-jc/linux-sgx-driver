@@ -150,7 +150,7 @@ static struct sgx_encl *sgx_isolate_encl(struct sgx_tgid_ctx *ctx,
 }
 
 static void sgx_isolate_pages(struct sgx_encl *encl,
-			      struct list_head *dst,
+			      struct list_head *swap_list,
 			      unsigned long nr_to_scan)
 {
 	struct sgx_encl_page *entry;
@@ -168,7 +168,7 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 
 		if (!(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
 			entry->flags |= SGX_ENCL_PAGE_RESERVED;
-			list_move_tail(&entry->load_list, dst);
+			list_move_tail(&entry->load_list, swap_list);
 		} else {
 			list_move_tail(&entry->load_list, &encl->load_list);
 		}
@@ -233,7 +233,7 @@ void sgx_free_encl_page(struct sgx_encl_page *entry,
 	entry->flags &= ~SGX_ENCL_PAGE_RESERVED;
 }
 
-static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
+static void sgx_write_pages(struct sgx_encl *encl, struct list_head *swap_list)
 {
 	struct sgx_encl_page *entry;
 	struct sgx_encl_page *tmp;
@@ -243,15 +243,15 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 	int i = 0;
 	int ret;
 
-	if (list_empty(src))
+	if (list_empty(swap_list))
 		return;
 
-	entry = list_first_entry(src, struct sgx_encl_page, load_list);
+	entry = list_first_entry(swap_list, struct sgx_encl_page, load_list);
 
 	if (!sgx_pin_mm(encl)) {
 		mutex_lock(&encl->lock);
-		while (!list_empty(src)) {
-			entry = list_first_entry(src, struct sgx_encl_page,
+		while (!list_empty(swap_list)) {
+			entry = list_first_entry(swap_list, struct sgx_encl_page,
 						 load_list);
 			list_del(&entry->load_list);
 			sgx_free_encl_page(entry, encl, 0);
@@ -262,7 +262,7 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 
 	/* EBLOCK */
 
-	list_for_each_entry_safe(entry, tmp, src, load_list) {
+	list_for_each_entry_safe(entry, tmp, swap_list, load_list) {
 		mutex_lock(&encl->lock);
 		evma = sgx_find_vma(encl, entry->addr);
 		if (!evma) {
@@ -298,8 +298,8 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 	mutex_lock(&encl->lock);
 	i = 0;
 
-	while (!list_empty(src)) {
-		entry = list_first_entry(src, struct sgx_encl_page,
+	while (!list_empty(swap_list)) {
+		entry = list_first_entry(swap_list, struct sgx_encl_page,
 					 load_list);
 		list_del(&entry->load_list);
 
@@ -345,7 +345,7 @@ static void sgx_swap_pages(unsigned long nr_to_scan)
 {
 	struct sgx_tgid_ctx *ctx;
 	struct sgx_encl *encl;
-	LIST_HEAD(cluster);
+	LIST_HEAD(swap_list);
 
 	ctx = sgx_isolate_tgid_ctx(nr_to_scan);
 	if (!ctx)
@@ -355,8 +355,8 @@ static void sgx_swap_pages(unsigned long nr_to_scan)
 	if (!encl)
 		goto out;
 
-	sgx_isolate_pages(encl, &cluster, nr_to_scan);
-	sgx_write_pages(encl, &cluster);
+	sgx_isolate_pages(encl, &swap_list, nr_to_scan);
+	sgx_write_pages(encl, &swap_list);
 
 	kref_put(&encl->refcount, sgx_encl_release);
 out:
