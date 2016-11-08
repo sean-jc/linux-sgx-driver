@@ -249,15 +249,14 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 	entry = list_first_entry(src, struct sgx_encl_page, load_list);
 
 	if (!sgx_pin_mm(encl)) {
+		mutex_lock(&encl->lock);
 		while (!list_empty(src)) {
 			entry = list_first_entry(src, struct sgx_encl_page,
 						 load_list);
 			list_del(&entry->load_list);
-			mutex_lock(&encl->lock);
 			sgx_free_encl_page(entry, encl, 0);
-			mutex_unlock(&encl->lock);
 		}
-
+		mutex_unlock(&encl->lock);
 		return;
 	}
 
