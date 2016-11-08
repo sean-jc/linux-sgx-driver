@@ -136,9 +136,7 @@ static struct sgx_tgid_ctx *sgx_isolate_tgid_ctx(unsigned long nr_to_scan)
 		 */
 		list_move_tail(&ctx->list, &sgx_tgid_ctx_list);
 
-		/* Non-empty TGID context? */
-		if (!list_empty(&ctx->encl_list) &&
-		    kref_get_unless_zero(&ctx->refcount))
+		if (kref_get_unless_zero(&ctx->refcount))
 			break;
 
 		ctx = NULL;
@@ -155,10 +153,10 @@ static struct sgx_encl *sgx_isolate_encl(struct sgx_tgid_ctx *ctx,
 	struct sgx_encl *encl = NULL;
 	int i;
 
-	mutex_lock(&sgx_tgid_ctx_mutex);
+	mutex_lock(&ctx->lock);
 
 	if (list_empty(&ctx->encl_list)) {
-		mutex_unlock(&sgx_tgid_ctx_mutex);
+		mutex_unlock(&ctx->lock);
 		return NULL;
 	}
 
@@ -180,7 +178,7 @@ static struct sgx_encl *sgx_isolate_encl(struct sgx_tgid_ctx *ctx,
 		encl = NULL;
 	}
 
-	mutex_unlock(&sgx_tgid_ctx_mutex);
+	mutex_unlock(&ctx->lock);
 
 	return encl;
 }

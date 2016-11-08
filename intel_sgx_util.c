@@ -232,11 +232,12 @@ void sgx_encl_release(struct kref *ref)
 	struct sgx_encl *encl =
 		container_of(ref, struct sgx_encl, refcount);
 
-	mutex_lock(&sgx_tgid_ctx_mutex);
-	if (!list_empty(&encl->encl_list))
-		list_del(&encl->encl_list);
-
-	mutex_unlock(&sgx_tgid_ctx_mutex);
+	if (encl->tgid_ctx) {
+		mutex_lock(&encl->tgid_ctx->lock);
+		if (!list_empty(&encl->encl_list))
+			list_del(&encl->encl_list);
+		mutex_unlock(&encl->tgid_ctx->lock);
+	}
 
 	rb1 = rb_first(&encl->encl_rb);
 	while (rb1) {
