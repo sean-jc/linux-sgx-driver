@@ -366,19 +366,12 @@ out:
 int ksgxswapd(void *p)
 {
 	DEFINE_WAIT(wait);
-	unsigned int nr_free;
-	unsigned int nr_high;
 
 	for ( ; ; ) {
 		if (kthread_should_stop())
 			break;
 
-		spin_lock(&sgx_free_list_lock);
-		nr_free = sgx_nr_free_pages;
-		nr_high = sgx_nr_high_pages;
-		spin_unlock(&sgx_free_list_lock);
-
-		if (nr_free < nr_high) {
+		if (sgx_nr_free_pages < sgx_nr_high_pages) {
 			sgx_swap_pages(SGX_NR_SWAP_CLUSTER_MAX);
 			schedule();
 		} else {
