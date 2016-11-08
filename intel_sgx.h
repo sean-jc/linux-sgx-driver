@@ -90,12 +90,12 @@ struct sgx_va_page {
 enum sgx_encl_page_flags {
 	SGX_ENCL_PAGE_TCS	= BIT(0),
 	SGX_ENCL_PAGE_RESERVED	= BIT(1),
+	SGX_ENCL_PAGE_AGE	= BIT(2),
 };
 
 struct sgx_encl_page {
 	unsigned long addr;
 	unsigned int flags;
-	int epc_age;
 	struct sgx_epc_page *epc_page;
 	struct list_head	epc_list;
 	struct sgx_encl *encl;

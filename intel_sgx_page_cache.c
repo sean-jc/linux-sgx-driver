@@ -221,6 +221,27 @@ static inline void __sgx_unreserve_encl(struct sgx_encl *encl, bool put_ref)
 		kref_put(&encl->refcount, sgx_encl_release_ctx_locked);
 }
 
+static inline void sgx_epc_page_reset_age(struct sgx_encl_page *page)
+{
+	page->flags &= ~SGX_ENCL_PAGE_AGE;
+}
+
+static inline bool sgx_epc_page_dec_age(struct sgx_encl_page *page)
+{
+	if (!(page->flags & SGX_ENCL_PAGE_AGE))
+		return true;
+	page->flags &= ~SGX_ENCL_PAGE_AGE;
+	return false;
+}
+
+static inline bool sgx_epc_page_inc_age(struct sgx_encl_page *page)
+{
+	if (page->flags & SGX_ENCL_PAGE_AGE)
+		return true;
+	page->flags |= SGX_ENCL_PAGE_AGE;
+	return false;
+}
+
 /**
  * __sgx_age_pages() - Age EPC pages for a single enclave
  * @encl		Enclave whose pages are to be aged
@@ -237,7 +258,7 @@ static void __sgx_age_pages(struct sgx_encl *encl)
 	for (i = 0; i < nr_to_scan && !list_empty(&encl->active_epc); i++) {
 		entry = list_first_entry(&encl->active_epc, struct sgx_encl_page, epc_list);
 		if (!sgx_test_and_clear_young(entry)) {
-			entry->epc_age = -1;
+			sgx_epc_page_reset_age(entry);
 			list_move_tail(&entry->epc_list, &new);
 		} else {
 			list_move_tail(&entry->epc_list, &tmp);
@@ -250,21 +271,15 @@ static void __sgx_age_pages(struct sgx_encl *encl)
 	for (i = 0; i < nr_to_scan && !list_empty(&encl->inactive_epc); i++) {
 		entry = list_first_entry(&encl->inactive_epc, struct sgx_encl_page, epc_list);
 		if (!sgx_test_and_clear_young(entry)) {
-			if (--entry->epc_age < -1) {
-				entry->epc_age = -1;
+			if (sgx_epc_page_dec_age(entry))
 				list_move_tail(&entry->epc_list, &old);
-			}
-			else {
+			else
 				list_move_tail(&entry->epc_list, &tmp);
-			}
 		} else {
-			if (++entry->epc_age >= 1) {
-				entry->epc_age = 1;
+			if (sgx_epc_page_inc_age(entry))
 				list_move_tail(&entry->epc_list, &encl->active_epc);
-			}
-			else {
+			else
 				list_move_tail(&entry->epc_list, &tmp);
-			}
 		}
 	}
 
@@ -736,8 +751,7 @@ void sgx_activate_epc_page(struct sgx_encl_page *page,
 		struct sgx_encl *encl)
 {
 	sgx_test_and_clear_young(page);
-
-	page->epc_age = 0;
+	sgx_epc_page_reset_age(page);
 	list_add_tail(&page->epc_list, &encl->active_epc);
 }
 
