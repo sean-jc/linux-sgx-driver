@@ -190,7 +190,7 @@ long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg);
 #endif
 
 /* Utility functions */
-
+void sgx_activate_epc_page(struct sgx_encl_page *page, struct sgx_encl *encl);
 void *sgx_get_epc_page(struct sgx_epc_page *entry);
 void sgx_put_epc_page(void *epc_page_vaddr);
 struct page *sgx_get_backing(struct sgx_encl *encl,

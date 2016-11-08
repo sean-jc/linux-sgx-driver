@@ -77,6 +77,42 @@ static unsigned int sgx_nr_high_pages;
 struct task_struct *ksgxswapd_tsk;
 static DECLARE_WAIT_QUEUE_HEAD(ksgxswapd_waitq);
 
+
+static int sgx_test_and_clear_young_cb(pte_t *ptep, pgtable_t token,
+				       unsigned long addr, void *data)
+{
+	int ret = pte_young(*ptep);
+	if (ret) {
+		pte_t pte = pte_mkold(*ptep);
+		set_pte_at((struct mm_struct *) data, addr, ptep, pte);
+	}
+	return ret;
+}
+
+/**
+ * sgx_test_and_clear_young() - Test and reset the accessed bit
+ * @page:	page to be tested for recent access
+ * @encl:	enclave that owns the page 
+ *
+ * Checks the Access (A) bit from the PTE corresponding to the
+ * enclave page and clears it.  Returns 1 if the page has been
+ * recently accessed and 0 if not.
+ */
+static int sgx_test_and_clear_young(struct sgx_encl_page *page, struct sgx_encl *encl)
+{
+	struct vm_area_struct *vma = sgx_find_vma(encl, page->addr);
+	if (!vma)
+		return 0;
+	return apply_to_page_range(vma->vm_mm, page->addr, PAGE_SIZE,
+				   sgx_test_and_clear_young_cb, vma->vm_mm);
+}
+
+void sgx_activate_epc_page(struct sgx_encl_page *page, struct sgx_encl *encl)
+{
+	sgx_test_and_clear_young(page, encl);
+	list_add_tail(&page->load_list, &encl->load_list);
+}
+
 static struct sgx_tgid_ctx *sgx_isolate_tgid_ctx(unsigned long nr_to_scan)
 {
 	struct sgx_tgid_ctx *ctx = NULL;
@@ -166,7 +202,8 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 					 struct sgx_encl_page,
 					 load_list);
 
-		if (!(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
+		if (!sgx_test_and_clear_young(entry, encl) &&
+			!(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
 			entry->flags |= SGX_ENCL_PAGE_RESERVED;
 			list_move_tail(&entry->load_list, swap_list);
 		} else {

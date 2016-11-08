@@ -293,7 +293,7 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 	}
 
 	encl_page->epc_page = epc_page;
-	list_add_tail(&encl_page->load_list, &encl->load_list);
+	sgx_activate_epc_page(encl_page, encl);
 
 	mutex_unlock(&encl->lock);
 	sgx_unpin_mm(encl);
