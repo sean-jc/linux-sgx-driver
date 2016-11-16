@@ -66,6 +66,8 @@
 
 #define SGX_CPUID		0x12
 
+#define X86_FEATURE_SGX         ( 9*32+ 2) /* Software Guard Extensions */
+
 enum sgx_page_type {
 	SGX_PAGE_TYPE_SECS	= 0x00,
 	SGX_PAGE_TYPE_TCS	= 0x01,
