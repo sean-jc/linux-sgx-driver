@@ -94,10 +94,9 @@ static void sgx_vma_close(struct vm_area_struct *vma)
 	kref_put(&encl->refcount, sgx_encl_release);
 }
 
-static int sgx_vma_fault(struct vm_fault *vmf)
+static int sgx_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
-	struct vm_area_struct *vma = vmf->vma;
-	unsigned long addr = (unsigned long)vmf->address;
+	unsigned long addr = (unsigned long)vmf->virtual_address;
 	struct sgx_encl_page *entry;
 
 	entry = sgx_fault_page(vma, addr, 0);
