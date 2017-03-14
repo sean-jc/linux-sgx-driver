@@ -63,7 +63,7 @@
 #include <linux/highmem.h>
 #include <linux/kthread.h>
 #include <linux/ratelimit.h>
-#include <linux/sched/signal.h>
+#include <linux/signal.h>
 #include <linux/slab.h>
 
 #define SGX_NR_LOW_EPC_PAGES_DEFAULT 32

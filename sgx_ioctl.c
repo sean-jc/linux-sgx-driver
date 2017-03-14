@@ -64,7 +64,7 @@
 #include <linux/file.h>
 #include <linux/highmem.h>
 #include <linux/ratelimit.h>
-#include <linux/sched/signal.h>
+#include <linux/signal.h>
 #include <linux/slab.h>
 #include <linux/hashtable.h>
 #include <linux/shmem_fs.h>

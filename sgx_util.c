@@ -61,7 +61,7 @@
 #include "sgx.h"
 #include <linux/highmem.h>
 #include <linux/shmem_fs.h>
-#include <linux/sched/mm.h>
+#include <linux/mm.h>
 
 struct page *sgx_get_backing(struct sgx_encl *encl,
 			     struct sgx_encl_page *entry,
