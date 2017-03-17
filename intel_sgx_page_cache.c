@@ -195,6 +195,9 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 
 	mutex_lock(&encl->lock);
 
+	if (encl->flags & SGX_ENCL_DEAD)
+		goto out;
+
 	for (i = 0; i < nr_to_scan; i++) {
 		if (list_empty(&encl->load_list))
 			break;
@@ -211,7 +214,7 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 			list_move_tail(&entry->load_list, &encl->load_list);
 		}
 	}
-
+out:
 	mutex_unlock(&encl->lock);
 }
 
@@ -392,14 +395,11 @@ static void sgx_swap_pages(unsigned long nr_to_scan)
 	if (!encl)
 		goto out;
 
-	if (!sgx_pin_mm(encl))
-		goto out_enclave;
-
+	down_read(&encl->mm->mmap_sem);
 	sgx_isolate_pages(encl, &cluster, nr_to_scan);
 	sgx_write_pages(encl, &cluster);
-	sgx_unpin_mm(encl);
+	up_read(&encl->mm->mmap_sem);
 
-out_enclave:
 	kref_put(&encl->refcount, sgx_encl_release);
 out:
 	kref_put(&ctx->refcount, sgx_tgid_ctx_release);

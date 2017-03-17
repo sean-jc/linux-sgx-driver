@@ -147,33 +147,6 @@ void sgx_zap_tcs_ptes(struct sgx_encl *encl, struct vm_area_struct *vma)
 	}
 }
 
-bool sgx_pin_mm(struct sgx_encl *encl)
-{
-	mutex_lock(&encl->lock);
-	if (encl->flags & SGX_ENCL_DEAD) {
-		mutex_unlock(&encl->lock);
-		return false;
-	}
-
-	atomic_inc(&encl->mm->mm_count);
-	mutex_unlock(&encl->lock);
-
-	down_read(&encl->mm->mmap_sem);
-
-	if (encl->flags & SGX_ENCL_DEAD) {
-		sgx_unpin_mm(encl);
-		return false;
-	}
-
-	return true;
-}
-
-void sgx_unpin_mm(struct sgx_encl *encl)
-{
-	up_read(&encl->mm->mmap_sem);
-	mmdrop(encl->mm);
-}
-
 void sgx_invalidate(struct sgx_encl *encl)
 {
 	struct vm_area_struct *vma;

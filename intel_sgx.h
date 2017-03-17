@@ -217,8 +217,6 @@ int sgx_eremove(struct sgx_epc_page *epc_page);
 struct vm_area_struct *sgx_find_vma(struct sgx_encl *encl, unsigned long addr);
 void sgx_zap_tcs_ptes(struct sgx_encl *encl,
 		      struct vm_area_struct *vma);
-bool sgx_pin_mm(struct sgx_encl *encl);
-void sgx_unpin_mm(struct sgx_encl *encl);
 void sgx_invalidate(struct sgx_encl *encl);
 int sgx_find_encl(struct mm_struct *mm, unsigned long addr,
 		  struct vm_area_struct **vma);

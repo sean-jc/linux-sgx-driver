@@ -220,10 +220,7 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 	if (IS_ERR(epc_page))
 		return false;
 
-	if (!sgx_pin_mm(encl)) {
-		sgx_free_page(epc_page, encl, 0);
-		return false;
-	}
+	down_read(&encl->mm->mmap_sem);
 
 	mutex_lock(&encl->lock);
 
@@ -271,12 +268,12 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 	list_add_tail(&encl_page->load_list, &encl->load_list);
 
 	mutex_unlock(&encl->lock);
-	sgx_unpin_mm(encl);
+	up_read(&encl->mm->mmap_sem);
 	return true;
 out:
 	sgx_free_page(epc_page, encl, 0);
 	mutex_unlock(&encl->lock);
-	sgx_unpin_mm(encl);
+	up_read(&encl->mm->mmap_sem);
 	return false;
 }
 
