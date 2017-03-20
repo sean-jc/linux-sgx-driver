@@ -381,10 +381,8 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 		encl->secs_child_cnt--;
 	}
 
-	if (!encl->secs_child_cnt && (encl->flags & SGX_ENCL_INITIALIZED)) {
+	if (!encl->secs_child_cnt && (encl->flags & SGX_ENCL_INITIALIZED))
 		sgx_evict_page(&encl->secs_page, encl);
-		encl->flags |= SGX_ENCL_SECS_EVICTED;
-	}
 
 	mutex_unlock(&encl->lock);
 }

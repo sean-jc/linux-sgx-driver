@@ -292,7 +292,7 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
 	}
 
 	/* If SECS is evicted then reload it first */
-	if (encl->flags & SGX_ENCL_SECS_EVICTED) {
+	if (!encl->secs_page.epc_page) {
 		secs_epc_page = sgx_alloc_page(SGX_ALLOC_ATOMIC);
 		if (IS_ERR(secs_epc_page)) {
 			rc = PTR_ERR(secs_epc_page);
@@ -305,7 +305,6 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
 			goto out;
 
 		encl->secs_page.epc_page = secs_epc_page;
-		encl->flags &= ~SGX_ENCL_SECS_EVICTED;
 
 		/* Do not free */
 		secs_epc_page = NULL;

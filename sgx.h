@@ -122,9 +122,8 @@ struct sgx_tgid_ctx {
 enum sgx_encl_flags {
 	SGX_ENCL_INITIALIZED	= BIT(0),
 	SGX_ENCL_DEBUG		= BIT(1),
-	SGX_ENCL_SECS_EVICTED	= BIT(2),
-	SGX_ENCL_SUSPEND	= BIT(3),
-	SGX_ENCL_DEAD		= BIT(4),
+	SGX_ENCL_SUSPEND	= BIT(2),
+	SGX_ENCL_DEAD		= BIT(3),
 };
 
 struct sgx_encl {
