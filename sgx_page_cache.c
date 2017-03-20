@@ -289,8 +289,8 @@ static inline unsigned int sgx_alloc_va_slot(struct sgx_encl *encl,
        return slot << 3;
 }
 
-static int __sgx_ewb(struct sgx_encl *encl,
-		     struct sgx_encl_page *encl_page)
+static int sgx_ewb(struct sgx_encl *encl,
+		   struct sgx_encl_page *encl_page)
 {
 	struct sgx_page_info pginfo;
 	struct sgx_va_page *va_page;
@@ -357,15 +357,15 @@ out:
 	return ret;
 }
 
-static bool sgx_ewb(struct sgx_encl *encl,
-		    struct sgx_encl_page *entry)
+static bool sgx_evict_page(struct sgx_encl_page *entry,
+			   struct sgx_encl *encl)
 {
-	int ret = __sgx_ewb(encl, entry);
+	int ret = sgx_ewb(encl, entry);
 
 	if (ret == SGX_NOT_TRACKED) {
 		/* slow path, IPI needed */
 		sgx_flush_cpus(encl);
-		ret = __sgx_ewb(encl, entry);
+		ret = sgx_ewb(encl, entry);
 	}
 
 	if (ret) {
@@ -378,12 +378,6 @@ static bool sgx_ewb(struct sgx_encl *encl,
 	}
 
 	return true;
-}
-
-static void sgx_evict_page(struct sgx_encl_page *entry,
-			   struct sgx_encl *encl)
-{
-	sgx_ewb(encl, entry);
 }
 
 static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
