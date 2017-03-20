@@ -341,10 +341,14 @@ static int __sgx_ewb(struct sgx_encl *encl,
 	sgx_put_page(va);
 	sgx_put_page(epc);
 
-	if (ret == SGX_SUCCESS)
+	if (ret == SGX_SUCCESS) {
+		encl_page->flags &= ~(SGX_ENCL_PAGE_RESERVED | SGX_ENCL_PAGE_EPC_VALID);
+		sgx_free_page(encl_page->epc_page, encl);
 		encl_page->va_page = va_page;
-	else
+	}
+	else {
 		sgx_free_va_slot(va_page, encl_page->va_offset);
+	}
 
 out_pcmd:
 	sgx_put_backing(pcmd, true);
@@ -380,9 +384,6 @@ static void sgx_evict_page(struct sgx_encl_page *entry,
 			   struct sgx_encl *encl)
 {
 	sgx_ewb(encl, entry);
-	sgx_free_page(entry->epc_page, encl);
-	entry->epc_page = NULL;
-	entry->flags &= ~SGX_ENCL_PAGE_RESERVED;
 }
 
 static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)

@@ -267,6 +267,7 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 		goto out;
 	}
 
+	encl_page->flags |= SGX_ENCL_PAGE_EPC_VALID;
 	encl_page->epc_page = epc_page;
 	sgx_test_and_clear_young(encl_page, encl);
 	list_add_tail(&encl_page->load_list, &encl->load_list);
@@ -558,6 +559,7 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 		goto out;
 	}
 
+	encl->secs_page.flags |= SGX_ENCL_PAGE_EPC_VALID;
 	encl->secs_page.epc_page = secs_epc;
 	createp->src = (unsigned long)encl->base;
 

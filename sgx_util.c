@@ -220,6 +220,7 @@ static int sgx_eldu(struct sgx_encl *encl,
 		ret = -EFAULT;
 	} else {
 		sgx_free_va_slot(encl_page->va_page, encl_page->va_offset);
+		encl_page->flags |= SGX_ENCL_PAGE_EPC_VALID;
 		encl_page->epc_page = epc_page;
 	}
 
@@ -281,7 +282,7 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
 	}
 
 	/* Legal race condition, page is already faulted. */
-	if (entry->epc_page) {
+	if (entry->flags & SGX_ENCL_PAGE_EPC_VALID) {
 		if (reserve)
 			entry->flags |= SGX_ENCL_PAGE_RESERVED;
 		goto out;
@@ -295,7 +296,7 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
 	}
 
 	/* If SECS is evicted then reload it first */
-	if (!encl->secs_page.epc_page) {
+	if (!(encl->secs_page.flags & SGX_ENCL_PAGE_EPC_VALID)) {
 		secs_epc_page = sgx_alloc_page(SGX_ALLOC_ATOMIC);
 		if (IS_ERR(secs_epc_page)) {
 			rc = PTR_ERR(secs_epc_page);
@@ -374,7 +375,7 @@ void sgx_encl_release(struct kref *ref)
 
 	radix_tree_for_each_slot(slot, &encl->page_tree, &iter, 0) {
 		entry = *slot;
-		if (entry->epc_page) {
+		if (entry->flags & SGX_ENCL_PAGE_EPC_VALID) {
 			list_del(&entry->load_list);
 			sgx_free_page(entry->epc_page, encl);
 		}
@@ -390,10 +391,8 @@ void sgx_encl_release(struct kref *ref)
 		kfree(va_page);
 	}
 
-	if (encl->secs_page.epc_page)
+	if (encl->secs_page.flags & SGX_ENCL_PAGE_EPC_VALID)
 		sgx_free_page(encl->secs_page.epc_page, encl);
-
-	encl->secs_page.epc_page = NULL;
 
 	if (encl->tgid_ctx)
 		kref_put(&encl->tgid_ctx->refcount, sgx_tgid_ctx_release);

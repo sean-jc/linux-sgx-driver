@@ -91,15 +91,18 @@ static inline void sgx_free_va_slot(struct sgx_va_page *page,
 enum sgx_encl_page_flags {
 	SGX_ENCL_PAGE_TCS	= BIT(0),
 	SGX_ENCL_PAGE_RESERVED	= BIT(1),
+	SGX_ENCL_PAGE_EPC_VALID	= BIT(2),
 };
 
 struct sgx_encl_page {
 	unsigned long addr;
 	unsigned int flags;
-	struct sgx_epc_page *epc_page;
-	struct list_head load_list;
-	struct sgx_va_page *va_page;
 	unsigned int va_offset;
+	union {
+		struct sgx_epc_page *epc_page;
+		struct sgx_va_page *va_page;
+	};
+	struct list_head load_list;
 };
 
 struct sgx_tgid_ctx {
