@@ -382,7 +382,7 @@ struct sgx_encl_page *sgx_fault_page(struct vm_area_struct *vma,
 	return entry;
 }
 
-void sgx_encl_release(struct kref *ref)
+static void __sgx_encl_release(struct kref *ref, bool ctx_locked)
 {
 	struct sgx_encl_page *entry;
 	struct sgx_va_page *va_page;
@@ -391,10 +391,12 @@ void sgx_encl_release(struct kref *ref)
 	void **slot;
 
 	if (encl->tgid_ctx) {
-		mutex_lock(&encl->tgid_ctx->lock);
+		if (!ctx_locked)
+			mutex_lock(&encl->tgid_ctx->lock);
 		if (!list_empty(&encl->encl_list))
 			list_del(&encl->encl_list);
-		mutex_unlock(&encl->tgid_ctx->lock);
+		if (!ctx_locked)
+			mutex_unlock(&encl->tgid_ctx->lock);
 	}
 
 	if (encl->mmu_notifier.ops)
@@ -434,4 +436,14 @@ void sgx_encl_release(struct kref *ref)
 		fput(encl->pcmd);
 
 	kfree(encl);
+}
+
+void sgx_encl_release(struct kref *ref)
+{
+	__sgx_encl_release(ref, false);
+}
+
+void sgx_encl_release_ctx_locked(struct kref *ref)
+{
+	__sgx_encl_release(ref, true);
 }

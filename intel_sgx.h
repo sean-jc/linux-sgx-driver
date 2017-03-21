@@ -231,6 +231,7 @@ struct sgx_encl_page *sgx_fault_page(struct vm_area_struct *vma,
 				     unsigned int flags);
 
 void sgx_encl_release(struct kref *ref);
+void sgx_encl_release_ctx_locked(struct kref *ref);
 void sgx_tgid_ctx_release(struct kref *ref);
 
 /* EPC page cache */
