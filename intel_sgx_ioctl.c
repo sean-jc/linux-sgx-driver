@@ -115,6 +115,7 @@ static int sgx_add_to_tgid_ctx(struct sgx_encl *encl)
 
 	ctx->tgid = tgid;
 	kref_init(&ctx->refcount);
+	mutex_init(&ctx->lock);
 	INIT_LIST_HEAD(&ctx->encl_list);
 
 	list_add(&ctx->list, &sgx_tgid_ctx_list);
@@ -594,10 +595,9 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	vma->vm_private_data = encl;
 	up_read(&current->mm->mmap_sem);
 
-	mutex_lock(&sgx_tgid_ctx_mutex);
+	mutex_lock(&encl->tgid_ctx->lock);
 	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
-	mutex_unlock(&sgx_tgid_ctx_mutex);
-
+	mutex_unlock(&encl->tgid_ctx->lock);
 out:
 	if (ret && encl)
 		kref_put(&encl->refcount, sgx_encl_release);

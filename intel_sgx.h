@@ -121,6 +121,7 @@ struct sgx_tgid_ctx {
 	struct pid *tgid;
 	atomic_t epc_cnt;
 	struct kref refcount;
+	struct mutex lock;
 	struct list_head encl_list;
 	struct list_head list;
 };
