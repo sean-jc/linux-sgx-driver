@@ -596,6 +596,7 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	up_read(&current->mm->mmap_sem);
 
 	mutex_lock(&encl->tgid_ctx->lock);
+	atomic_inc(&encl->tgid_ctx->encl_cnt);
 	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
 	mutex_unlock(&encl->tgid_ctx->lock);
 out:

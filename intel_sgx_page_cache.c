@@ -148,53 +148,23 @@ static struct sgx_tgid_ctx *sgx_isolate_tgid_ctx(unsigned long nr_to_scan)
 	return ctx;
 }
 
-static struct sgx_encl *sgx_isolate_encl(struct sgx_tgid_ctx *ctx,
-					       unsigned long nr_to_scan)
+static inline int __sgx_isolate_pages(struct sgx_encl *encl,
+				      struct list_head *swap_list,
+				      unsigned long nr_to_scan,
+				      unsigned int swap_epoch)
 {
-	struct sgx_encl *encl = NULL;
-	int i;
-
-	mutex_lock(&ctx->lock);
-
-	if (list_empty(&ctx->encl_list)) {
-		mutex_unlock(&ctx->lock);
-		return NULL;
-	}
-
-	for (i = 0; i < nr_to_scan; i++) {
-		/* Peek encl from the head. */
-		encl = list_first_entry(&ctx->encl_list, struct sgx_encl,
-					encl_list);
-
-		/* Move to the tail so that we do not encounter it in the
-		 * next iteration.
-		 */
-		list_move_tail(&encl->encl_list, &ctx->encl_list);
-
-		/* Enclave with faulted pages?  */
-		if (!list_empty(&encl->load_list) &&
-		    kref_get_unless_zero(&encl->refcount))
-			break;
-
-		encl = NULL;
-	}
-
-	mutex_unlock(&ctx->lock);
-
-	return encl;
-}
-
-static void sgx_isolate_pages(struct sgx_encl *encl,
-			      struct list_head *dst,
-			      unsigned long nr_to_scan)
-{
+	int i, nr_isolated = 0;
 	struct sgx_encl_page *entry;
-	int i;
 
+	down_read(&encl->mm->mmap_sem);
 	mutex_lock(&encl->lock);
 
 	if (encl->flags & SGX_ENCL_DEAD)
 		goto out;
+
+	if (encl->last_swap_epoch >= swap_epoch)
+		goto out;
+	encl->last_swap_epoch = swap_epoch;
 
 	for (i = 0; i < nr_to_scan; i++) {
 		if (list_empty(&encl->load_list))
@@ -206,14 +176,56 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 
 		if (!sgx_test_and_clear_young(entry, encl) &&
 		    !(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
+			nr_isolated++;
 			entry->flags |= SGX_ENCL_PAGE_RESERVED;
-			list_move_tail(&entry->load_list, dst);
+			list_move_tail(&entry->load_list, swap_list);
 		} else {
 			list_move_tail(&entry->load_list, &encl->load_list);
 		}
 	}
+
 out:
 	mutex_unlock(&encl->lock);
+	up_read(&encl->mm->mmap_sem);
+	return nr_isolated;
+}
+
+
+static int sgx_isolate_pages(struct sgx_tgid_ctx *ctx,
+			     struct list_head *swap_list,
+			     struct sgx_encl **iso_encl,
+			     unsigned long nr_to_scan)
+{
+	int i, nr_isolated = 0;
+	struct sgx_encl *encl;
+
+	unsigned int swap_epoch = (unsigned int)atomic_inc_return(&ctx->swap_cnt);
+
+	*iso_encl = NULL;
+	for (i = 0; !nr_isolated && i < atomic_read(&ctx->encl_cnt); i++) {
+		mutex_lock(&ctx->lock);
+		
+		encl = list_first_entry(&ctx->encl_list, struct sgx_encl,
+					encl_list);
+
+		list_move_tail(&encl->encl_list, &ctx->encl_list);
+
+		if (list_empty(&encl->load_list) ||
+		    !kref_get_unless_zero(&encl->refcount))
+			encl = NULL;
+
+		mutex_unlock(&ctx->lock);
+
+		if (encl) {
+			nr_isolated = __sgx_isolate_pages(encl, swap_list, nr_to_scan, swap_epoch);
+			if (!nr_isolated)
+				kref_put(&encl->refcount, sgx_encl_release);
+			else
+				*iso_encl = encl;
+		}
+	}
+
+	return nr_isolated;
 }
 
 static void sgx_ipi_cb(void *info)
@@ -342,11 +354,7 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 	struct sgx_encl_page *tmp;
 	struct vm_area_struct *vma;
 
-	if (list_empty(src))
-		return;
-
-	entry = list_first_entry(src, struct sgx_encl_page, load_list);
-
+	down_read(&encl->mm->mmap_sem);
 	mutex_lock(&encl->lock);
 
 	/* EBLOCK */
@@ -377,29 +385,24 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 	}
 
 	mutex_unlock(&encl->lock);
+	up_read(&encl->mm->mmap_sem);
 }
 
 static void sgx_swap_pages(unsigned long nr_to_scan)
 {
 	struct sgx_tgid_ctx *ctx;
 	struct sgx_encl *encl;
-	LIST_HEAD(cluster);
+	LIST_HEAD(swap_list);
 
 	ctx = sgx_isolate_tgid_ctx(nr_to_scan);
 	if (!ctx)
 		return;
 
-	encl = sgx_isolate_encl(ctx, nr_to_scan);
-	if (!encl)
-		goto out;
+	if (sgx_isolate_pages(ctx, &swap_list, &encl, nr_to_scan)) {
+		sgx_write_pages(encl, &swap_list);
+		kref_put(&encl->refcount, sgx_encl_release);
+	}
 
-	down_read(&encl->mm->mmap_sem);
-	sgx_isolate_pages(encl, &cluster, nr_to_scan);
-	sgx_write_pages(encl, &cluster);
-	up_read(&encl->mm->mmap_sem);
-
-	kref_put(&encl->refcount, sgx_encl_release);
-out:
 	kref_put(&ctx->refcount, sgx_tgid_ctx_release);
 }
 

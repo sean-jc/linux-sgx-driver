@@ -120,6 +120,8 @@ struct sgx_encl_page {
 struct sgx_tgid_ctx {
 	struct pid *tgid;
 	atomic_t epc_cnt;
+	atomic_t encl_cnt;
+	atomic_t swap_cnt;
 	struct kref refcount;
 	struct mutex lock;
 	struct list_head encl_list;
@@ -137,6 +139,7 @@ enum sgx_encl_flags {
 struct sgx_encl {
 	unsigned int flags;
 	unsigned int secs_child_cnt;
+	unsigned int last_swap_epoch;
 	struct mutex lock;
 	struct task_struct *owner;
 	struct mm_struct *mm;

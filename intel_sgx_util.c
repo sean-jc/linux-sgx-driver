@@ -392,8 +392,10 @@ void sgx_encl_release(struct kref *ref)
 
 	if (encl->tgid_ctx) {
 		mutex_lock(&encl->tgid_ctx->lock);
-		if (!list_empty(&encl->encl_list))
+		if (!list_empty(&encl->encl_list)) {
 			list_del(&encl->encl_list);
+			atomic_dec(&encl->tgid_ctx->encl_cnt);
+		}
 		mutex_unlock(&encl->tgid_ctx->lock);
 	}
 
