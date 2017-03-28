@@ -76,7 +76,10 @@
 
 struct sgx_epc_page {
 	resource_size_t		pa;
-	struct list_head	free_list;
+	union {
+		struct sgx_epc_cgroup	*epc_cg;
+		struct list_head	free_list;
+	}
 };
 
 #define SGX_VA_SLOT_COUNT 512

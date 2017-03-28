@@ -481,7 +481,11 @@ static struct sgx_epc_page *sgx_alloc_page_fast(void)
 		entry = list_first_entry(&sgx_free_list, struct sgx_epc_page,
 					 free_list);
 		list_del(&entry->free_list);
-		sgx_nr_free_pages--;
+
+		if (!sgx_epc_cgroup_try_charge(ctx, 1, &entry->epc_cg))
+			sgx_nr_free_pages--;
+		else
+			list_add(&entry->free_list, &sgx_free_list);
 	}
 
 	spin_unlock(&sgx_free_list_lock);
@@ -551,6 +555,8 @@ int sgx_free_page(struct sgx_epc_page *entry, struct sgx_encl *encl,
 	}
 
 	atomic_dec(&encl->tgid_ctx->epc_cnt);
+
+	sgx_epc_cgroup_uncharge(entry->epc_cg, 1);
 
 	spin_lock(&sgx_free_list_lock);
 	list_add(&entry->free_list, &sgx_free_list);
