@@ -218,6 +218,9 @@ static int sgx_eldu(struct sgx_encl *encl,
 	if (ret) {
 		sgx_err(encl, "ELDU returned %d\n", ret);
 		ret = -EFAULT;
+	} else {
+		sgx_free_va_slot(encl_page->va_page, encl_page->va_offset);
+		encl_page->epc_page = epc_page;
 	}
 
 	kunmap_atomic((void *)(unsigned long)(pginfo.pcmd - pcmd_offset));
@@ -303,8 +306,6 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
 		rc = sgx_eldu(encl, &encl->secs_page, secs_epc_page, true);
 		if (rc)
 			goto out;
-
-		encl->secs_page.epc_page = secs_epc_page;
 
 		/* Do not free */
 		secs_epc_page = NULL;

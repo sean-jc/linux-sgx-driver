@@ -384,63 +384,48 @@ static int sgx_validate_secs(const struct sgx_secs *secs)
 	return 0;
 }
 
-static int sgx_init_page(struct sgx_encl *encl,
-			 struct sgx_encl_page *entry,
-			 unsigned long addr)
+static int sgx_alloc_va_page(struct sgx_encl *encl)
 {
 	struct sgx_va_page *va_page;
 	struct sgx_epc_page *epc_page = NULL;
-	unsigned int va_offset = PAGE_SIZE;
 	void *vaddr;
 	int ret = 0;
 
-	list_for_each_entry(va_page, &encl->va_pages, list) {
-		va_offset = sgx_alloc_va_slot(va_page);
-		if (va_offset < PAGE_SIZE)
-			break;
+	va_page = kzalloc(sizeof(*va_page), GFP_KERNEL);
+	if (!va_page)
+		return -ENOMEM;
+
+	epc_page = sgx_alloc_page(0);
+	if (IS_ERR(epc_page)) {
+		kfree(va_page);
+		return PTR_ERR(epc_page);
 	}
 
-	if (va_offset == PAGE_SIZE) {
-		va_page = kzalloc(sizeof(*va_page), GFP_KERNEL);
-		if (!va_page)
-			return -ENOMEM;
-
-		epc_page = sgx_alloc_page(0);
-		if (IS_ERR(epc_page)) {
-			kfree(va_page);
-			return PTR_ERR(epc_page);
-		}
-
-		vaddr = sgx_get_page(epc_page);
-		if (!vaddr) {
-			sgx_warn(encl, "kmap of a new VA page failed %d\n",
-				 ret);
-			sgx_free_page(epc_page, encl);
-			kfree(va_page);
-			return -EFAULT;
-		}
-
-		ret = __epa(vaddr);
-		sgx_put_page(vaddr);
-
-		if (ret) {
-			sgx_warn(encl, "EPA returned %d\n", ret);
-			sgx_free_page(epc_page, encl);
-			kfree(va_page);
-			return -EFAULT;
-		}
-
-		va_page->epc_page = epc_page;
-		va_offset = sgx_alloc_va_slot(va_page);
-
-		mutex_lock(&encl->lock);
-		list_add(&va_page->list, &encl->va_pages);
-		mutex_unlock(&encl->lock);
+	vaddr = sgx_get_page(epc_page);
+	if (!vaddr) {
+		sgx_warn(encl, "kmap of a new VA page failed %d\n",
+				ret);
+		sgx_free_page(epc_page, encl);
+		kfree(va_page);
+		return -EFAULT;
 	}
 
-	entry->va_page = va_page;
-	entry->va_offset = va_offset;
-	entry->addr = addr;
+	ret = __epa(vaddr);
+	sgx_put_page(vaddr);
+
+	if (ret) {
+		sgx_warn(encl, "EPA returned %d\n", ret);
+		sgx_free_page(epc_page, encl);
+		kfree(va_page);
+		return -EFAULT;
+	}
+
+	va_page->epc_page = epc_page;
+
+	mutex_lock(&encl->lock);
+	encl->va_page_cnt++;
+	list_add(&va_page->list, &encl->va_pages);
+	mutex_unlock(&encl->lock);
 
 	return 0;
 }
@@ -549,8 +534,10 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	if (ret)
 		goto out;
 
-	ret = sgx_init_page(encl, &encl->secs_page,
-			    encl->base + encl->size);
+	encl->encl_page_cnt++;
+	encl->secs_page.addr = encl->base + encl->size;
+
+	ret = sgx_alloc_va_page(encl);
 	if (ret)
 		goto out;
 
@@ -690,13 +677,20 @@ static int __encl_add_page(struct sgx_encl *encl,
 		}
 	}
 
-	ret = sgx_init_page(encl, encl_page, addp->addr);
-	if (ret) {
-		__free_page(tmp_page);
-		return -EINVAL;
-	}
-
 	mutex_lock(&encl->lock);
+
+	encl_page->addr = addp->addr;
+	encl->encl_page_cnt++;
+
+	if (encl->encl_page_cnt > (encl->va_page_cnt * SGX_VA_SLOT_COUNT)) {
+		/* slow path, new VA page needed */
+		mutex_unlock(&encl->lock);
+		ret = sgx_alloc_va_page(encl);
+		mutex_lock(&encl->lock);
+		if (ret) {
+			goto out;
+		}
+	}
 
 	if (encl->flags & (SGX_ENCL_INITIALIZED | SGX_ENCL_DEAD)) {
 		ret = -EINVAL;
@@ -752,8 +746,7 @@ out:
 
 	if (ret) {
 		kfree(req);
-		sgx_free_va_slot(encl_page->va_page,
-				 encl_page->va_offset);
+		encl->encl_page_cnt--;
 	}
 
 	mutex_unlock(&encl->lock);

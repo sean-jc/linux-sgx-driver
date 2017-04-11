@@ -82,16 +82,6 @@ struct sgx_va_page {
 	struct list_head list;
 };
 
-static inline unsigned int sgx_alloc_va_slot(struct sgx_va_page *page)
-{
-	int slot = find_first_zero_bit(page->slots, SGX_VA_SLOT_COUNT);
-
-	if (slot < SGX_VA_SLOT_COUNT)
-		set_bit(slot, page->slots);
-
-	return slot << 3;
-}
-
 static inline void sgx_free_va_slot(struct sgx_va_page *page,
 				    unsigned int offset)
 {
@@ -129,6 +119,8 @@ enum sgx_encl_flags {
 struct sgx_encl {
 	unsigned int flags;
 	unsigned int secs_child_cnt;
+	unsigned int encl_page_cnt;
+	unsigned int va_page_cnt;
 	struct mutex lock;
 	struct mm_struct *mm;
 	struct file *backing;

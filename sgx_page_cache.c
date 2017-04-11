@@ -264,10 +264,36 @@ static void sgx_etrack(struct sgx_encl *encl)
 	}
 }
 
+
+/**
+ * sgx_alloc_va_slot() - allocate VA slot from a VA page
+ *
+ * @encl:        Enclave to allocate from
+ * @va_page:     Pointer to a VA page pointer
+ *
+ * Returns the offset of a free VA slot and sets va_page to the corresponding
+ * VA page.  If there are no free slots, returns PAGE_SIZE.
+ */
+static inline unsigned int sgx_alloc_va_slot(struct sgx_encl *encl,
+					     struct sgx_va_page **va_page)
+{
+       unsigned int slot = SGX_VA_SLOT_COUNT;
+       list_for_each_entry((*va_page), &encl->va_pages, list) {
+               slot = find_first_zero_bit((*va_page)->slots, SGX_VA_SLOT_COUNT);
+               if (slot < SGX_VA_SLOT_COUNT) {
+                       set_bit(slot, (*va_page)->slots);
+                       break;
+               }
+       }
+
+       return slot << 3;
+}
+
 static int __sgx_ewb(struct sgx_encl *encl,
 		     struct sgx_encl_page *encl_page)
 {
 	struct sgx_page_info pginfo;
+	struct sgx_va_page *va_page;
 	struct page *backing;
 	struct page *pcmd;
 	unsigned long pcmd_offset;
@@ -293,8 +319,15 @@ static int __sgx_ewb(struct sgx_encl *encl,
 		goto out;
 	}
 
+	encl_page->va_offset = sgx_alloc_va_slot(encl, &va_page);
+	if (encl_page->va_offset == PAGE_SIZE) {
+		sgx_warn(encl, "allocating a VA slot for EWB failed\n");
+		ret = -ENOMEM;
+		goto out_pcmd;
+	}
+
 	epc = sgx_get_page(encl_page->epc_page);
-	va = sgx_get_page(encl_page->va_page->epc_page);
+	va = sgx_get_page(va_page->epc_page);
 
 	pginfo.srcpge = (unsigned long)kmap_atomic(backing);
 	pginfo.pcmd = (unsigned long)kmap_atomic(pcmd) + pcmd_offset;
@@ -307,8 +340,14 @@ static int __sgx_ewb(struct sgx_encl *encl,
 
 	sgx_put_page(va);
 	sgx_put_page(epc);
-	sgx_put_backing(pcmd, true);
 
+	if (ret == SGX_SUCCESS)
+		encl_page->va_page = va_page;
+	else
+		sgx_free_va_slot(va_page, encl_page->va_offset);
+
+out_pcmd:
+	sgx_put_backing(pcmd, true);
 out:
 	sgx_put_backing(backing, true);
 	return ret;
