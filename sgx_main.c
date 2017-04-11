@@ -243,7 +243,7 @@ static int sgx_pm_suspend(struct device *dev)
 
 	list_for_each_entry(ctx, &sgx_tgid_ctx_list, list) {
 		list_for_each_entry(encl, &ctx->encl_list, encl_list) {
-			sgx_invalidate(encl);
+			sgx_invalidate(encl, false);
 			encl->flags |= SGX_ENCL_SUSPEND;
 			flush_work(&encl->add_page_work);
 		}

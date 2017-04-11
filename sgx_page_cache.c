@@ -221,15 +221,6 @@ out:
 	mutex_unlock(&encl->lock);
 }
 
-static void sgx_ipi_cb(void *info)
-{
-}
-
-static void sgx_flush_cpus(struct sgx_encl *encl)
-{
-	on_each_cpu_mask(mm_cpumask(encl->mm), sgx_ipi_cb, NULL, 1);
-}
-
 static void sgx_eblock(struct sgx_encl *encl,
 		       struct sgx_epc_page *epc_page)
 {
@@ -242,8 +233,7 @@ static void sgx_eblock(struct sgx_encl *encl,
 
 	if (ret) {
 		sgx_crit(encl, "EBLOCK returned %d\n", ret);
-		sgx_invalidate(encl);
-		sgx_flush_cpus(encl);
+		sgx_invalidate(encl, true);
 	}
 
 }
@@ -259,8 +249,7 @@ static void sgx_etrack(struct sgx_encl *encl)
 
 	if (ret) {
 		sgx_crit(encl, "ETRACK returned %d\n", ret);
-		sgx_invalidate(encl);
-		sgx_flush_cpus(encl);
+		sgx_invalidate(encl, true);
 	}
 }
 
@@ -327,8 +316,7 @@ static bool sgx_ewb(struct sgx_encl *encl,
 
 	if (ret) {
 		/* make enclave inaccessible */
-		sgx_invalidate(encl);
-		sgx_flush_cpus(encl);
+		sgx_invalidate(encl, true);
 		if (ret > 0)
 			sgx_err(encl, "EWB returned %d, enclave killed\n", ret);
 		return false;
