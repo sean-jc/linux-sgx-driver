@@ -267,9 +267,10 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 		goto out;
 	}
 
+	epc_page->encl_page = encl_page;
 	encl_page->epc_page = epc_page;
 	sgx_test_and_clear_young(encl_page, encl);
-	list_add_tail(&encl_page->load_list, &encl->load_list);
+	list_add_tail(&epc_page->epc_list, &encl->load_list);
 
 	mutex_unlock(&encl->lock);
 	up_read(&encl->mm->mmap_sem);

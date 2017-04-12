@@ -107,7 +107,6 @@ struct sgx_encl_page {
 	unsigned long addr;
 	unsigned int flags;
 	struct sgx_epc_page *epc_page;
-	struct list_head load_list;
 	struct sgx_va_page *va_page;
 	unsigned int va_offset;
 };

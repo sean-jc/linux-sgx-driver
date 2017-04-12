@@ -193,7 +193,7 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 			      struct list_head *dst,
 			      unsigned long nr_to_scan)
 {
-	struct sgx_encl_page *entry;
+	struct sgx_epc_page *entry;
 	int i;
 
 	mutex_lock(&encl->lock);
@@ -206,15 +206,15 @@ static void sgx_isolate_pages(struct sgx_encl *encl,
 			break;
 
 		entry = list_first_entry(&encl->load_list,
-					 struct sgx_encl_page,
-					 load_list);
+					 struct sgx_epc_page,
+					 epc_list);
 
-		if (!sgx_test_and_clear_young(entry, encl) &&
-		    !(entry->flags & SGX_ENCL_PAGE_RESERVED)) {
-			entry->flags |= SGX_ENCL_PAGE_RESERVED;
-			list_move_tail(&entry->load_list, dst);
+		if (!sgx_test_and_clear_young(entry->encl_page, encl) &&
+		    !(entry->encl_page->flags & SGX_ENCL_PAGE_RESERVED)) {
+			entry->encl_page->flags |= SGX_ENCL_PAGE_RESERVED;
+			list_move_tail(&entry->epc_list, dst);
 		} else {
-			list_move_tail(&entry->load_list, &encl->load_list);
+			list_move_tail(&entry->epc_list, &encl->load_list);
 		}
 	}
 out:
@@ -336,25 +336,25 @@ static void sgx_evict_page(struct sgx_encl_page *entry,
 
 static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 {
-	struct sgx_encl_page *entry;
-	struct sgx_encl_page *tmp;
+	struct sgx_epc_page *entry;
+	struct sgx_epc_page *tmp;
 	struct vm_area_struct *vma;
 
 	if (list_empty(src))
 		return;
 
-	entry = list_first_entry(src, struct sgx_encl_page, load_list);
+	entry = list_first_entry(src, struct sgx_epc_page, epc_list);
 
 	mutex_lock(&encl->lock);
 
 	/* EBLOCK */
-	list_for_each_entry_safe(entry, tmp, src, load_list) {
-		vma = sgx_find_vma(encl, entry->addr);
+	list_for_each_entry_safe(entry, tmp, src, epc_list) {
+		vma = sgx_find_vma(encl, entry->encl_page->addr);
 		if (vma) {
-			zap_vma_ptes(vma, entry->addr, PAGE_SIZE);
+			zap_vma_ptes(vma, entry->encl_page->addr, PAGE_SIZE);
 		}
 
-		sgx_eblock(encl, entry->epc_page);
+		sgx_eblock(encl, entry);
 	}
 
 	/* ETRACK */
@@ -362,10 +362,10 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
 
 	/* EWB */
 	while (!list_empty(src)) {
-		entry = list_first_entry(src, struct sgx_encl_page,
-					 load_list);
-		list_del(&entry->load_list);
-		sgx_evict_page(entry, encl);
+		entry = list_first_entry(src, struct sgx_epc_page,
+					 epc_list);
+		list_del(&entry->epc_list);
+		sgx_evict_page(entry->encl_page, encl);
 		encl->secs_child_cnt--;
 	}
 
@@ -429,7 +429,7 @@ int sgx_page_cache_init(resource_size_t start, unsigned long size)
 		new_epc_page->pa = start + i;
 
 		spin_lock(&sgx_free_list_lock);
-		list_add_tail(&new_epc_page->free_list, &sgx_free_list);
+		list_add_tail(&new_epc_page->epc_list, &sgx_free_list);
 		sgx_nr_total_epc_pages++;
 		sgx_nr_free_pages++;
 		spin_unlock(&sgx_free_list_lock);
@@ -442,8 +442,8 @@ int sgx_page_cache_init(resource_size_t start, unsigned long size)
 err_freelist:
 	list_for_each_safe(parser, temp, &sgx_free_list) {
 		spin_lock(&sgx_free_list_lock);
-		entry = list_entry(parser, struct sgx_epc_page, free_list);
-		list_del(&entry->free_list);
+		entry = list_entry(parser, struct sgx_epc_page, epc_list);
+		list_del(&entry->epc_list);
 		spin_unlock(&sgx_free_list_lock);
 		kfree(entry);
 	}
@@ -460,8 +460,8 @@ void sgx_page_cache_teardown(void)
 
 	spin_lock(&sgx_free_list_lock);
 	list_for_each_safe(parser, temp, &sgx_free_list) {
-		entry = list_entry(parser, struct sgx_epc_page, free_list);
-		list_del(&entry->free_list);
+		entry = list_entry(parser, struct sgx_epc_page, epc_list);
+		list_del(&entry->epc_list);
 		kfree(entry);
 	}
 	spin_unlock(&sgx_free_list_lock);
@@ -475,8 +475,8 @@ static struct sgx_epc_page *sgx_alloc_page_fast(void)
 
 	if (!list_empty(&sgx_free_list)) {
 		entry = list_first_entry(&sgx_free_list, struct sgx_epc_page,
-					 free_list);
-		list_del(&entry->free_list);
+					 epc_list);
+		list_del(&entry->epc_list);
 		sgx_nr_free_pages--;
 	}
 
@@ -561,7 +561,7 @@ int sgx_free_page(struct sgx_epc_page *entry, struct sgx_encl *encl)
 	}
 
 	spin_lock(&sgx_free_list_lock);
-	list_add(&entry->free_list, &sgx_free_list);
+	list_add(&entry->epc_list, &sgx_free_list);
 	sgx_nr_free_pages++;
 	spin_unlock(&sgx_free_list_lock);
 

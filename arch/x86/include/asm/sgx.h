@@ -343,7 +343,8 @@ struct sgx_encl;
 
 struct sgx_epc_page {
 	resource_size_t	pa;
-	struct list_head free_list;
+	struct list_head epc_list;
+	struct sgx_encl_page *encl_page;
 };
 
 extern struct sgx_epc_page *sgx_alloc_page(unsigned int flags);

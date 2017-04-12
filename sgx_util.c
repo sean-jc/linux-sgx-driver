@@ -110,9 +110,11 @@ struct vm_area_struct *sgx_find_vma(struct sgx_encl *encl, unsigned long addr)
 
 void sgx_zap_tcs_ptes(struct sgx_encl *encl, struct vm_area_struct *vma)
 {
+	struct sgx_epc_page *tmp;
 	struct sgx_encl_page *entry;
 
-	list_for_each_entry(entry, &encl->load_list, load_list) {
+	list_for_each_entry(tmp, &encl->load_list, epc_list) {
+		entry = tmp->encl_page;
 		if ((entry->flags & SGX_ENCL_PAGE_TCS) &&
 		    entry->addr >= vma->vm_start &&
 		    entry->addr < vma->vm_end)
@@ -335,6 +337,7 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
 	 */
 	encl->secs_child_cnt++;
 
+	epc_page->encl_page = entry;
 	entry->epc_page = epc_page;
 
 	if (reserve)
@@ -342,7 +345,7 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
 
 	/* Do not free */
 	epc_page = NULL;
-	list_add_tail(&entry->load_list, &encl->load_list);
+	list_add_tail(&entry->epc_page->load_list, &encl->load_list);
 
 	rc = vm_insert_pfn(vma, entry->addr, PFN_DOWN(entry->epc_page->pa));
 	if (rc) {
@@ -399,7 +402,7 @@ void sgx_encl_release(struct kref *ref)
 	radix_tree_for_each_slot(slot, &encl->page_tree, &iter, 0) {
 		entry = *slot;
 		if (entry->epc_page) {
-			list_del(&entry->load_list);
+			list_del(&entry->epc_page->epc_list);
 			sgx_free_page(entry->epc_page, encl);
 		}
 		radix_tree_delete(&encl->page_tree, entry->addr >> PAGE_SHIFT);
