@@ -108,33 +108,25 @@ struct vm_area_struct *sgx_find_vma(struct sgx_encl *encl, unsigned long addr)
 	return NULL;
 }
 
-void sgx_zap_tcs_ptes(struct sgx_encl *encl, struct vm_area_struct *vma)
+static void sgx_zap_tcs_ptes(struct sgx_encl *encl)
 {
-	struct sgx_epc_page *tmp;
+	struct vm_area_struct *vma;
 	struct sgx_encl_page *entry;
-
-	list_for_each_entry(tmp, &encl->load_list, epc_list) {
-		entry = tmp->encl_page;
-		if ((entry->flags & SGX_ENCL_PAGE_TCS) &&
-		    entry->addr >= vma->vm_start &&
-		    entry->addr < vma->vm_end)
+	struct radix_tree_iter iter;
+	void **slot;
+	
+	radix_tree_for_each_slot(slot, &encl->page_tree, &iter, 0) {
+	entry = *slot;
+	if (entry->epc_page && (entry->flags & SGX_ENCL_PAGE_TCS)) {
+		vma = sgx_find_vma(encl, entry->addr);
+		if (vma)
 			zap_vma_ptes(vma, entry->addr, PAGE_SIZE);
 	}
 }
 
 void sgx_invalidate(struct sgx_encl *encl, bool flush_cpus)
 {
-	struct vm_area_struct *vma;
-	unsigned long addr;
-
-	for (addr = encl->base; addr < (encl->base + encl->size);
-	     addr = vma->vm_end) {
-		vma = sgx_find_vma(encl, addr);
-		if (vma)
-			sgx_zap_tcs_ptes(encl, vma);
-		else
-			break;
-	}
+	sgx_zap_tcs_ptes(encl);
 
 	encl->flags |= SGX_ENCL_DEAD;
 
