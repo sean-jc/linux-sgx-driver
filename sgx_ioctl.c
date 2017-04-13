@@ -270,10 +270,14 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req)
 	epc_page->encl_page = encl_page;
 	encl_page->epc_page = epc_page;
 	sgx_test_and_clear_young(encl_page, encl);
-	list_add_tail(&epc_page->epc_list, &encl->load_list);
 
 	mutex_unlock(&encl->lock);
 	up_read(&encl->mm->mmap_sem);
+
+	mutex_lock(&sgx_active_list_mutex);
+	list_add_tail(&epc_page->epc_list, &sgx_active_list);
+	mutex_unlock(&sgx_active_list_mutex);
+	
 	return true;
 out:
 	sgx_free_page(epc_page, encl);
@@ -528,7 +532,6 @@ static long sgx_ioc_enclave_create(struct file *filep, unsigned int cmd,
 	INIT_LIST_HEAD(&encl->add_page_reqs);
 	INIT_LIST_HEAD(&encl->va_pages);
 	INIT_RADIX_TREE(&encl->page_tree, GFP_KERNEL);
-	INIT_LIST_HEAD(&encl->load_list);
 	INIT_LIST_HEAD(&encl->encl_list);
 	mutex_init(&encl->lock);
 	INIT_WORK(&encl->add_page_work, sgx_add_page_worker);

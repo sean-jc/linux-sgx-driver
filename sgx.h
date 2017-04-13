@@ -133,7 +133,6 @@ struct sgx_encl {
 	struct mm_struct *mm;
 	struct file *backing;
 	struct file *pcmd;
-	struct list_head load_list;
 	struct kref refcount;
 	unsigned long base;
 	unsigned long size;
@@ -211,6 +210,8 @@ struct sgx_encl_page *sgx_fault_page(struct vm_area_struct *vma,
 void sgx_encl_release(struct kref *ref);
 void sgx_tgid_ctx_release(struct kref *ref);
 
+extern struct list_head sgx_active_list;
+extern struct mutex sgx_active_list_mutex;
 extern struct mutex sgx_tgid_ctx_mutex;
 extern struct list_head sgx_tgid_ctx_list;
 extern struct task_struct *ksgxswapd_tsk;

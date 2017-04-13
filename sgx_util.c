@@ -356,6 +356,11 @@ out:
 		sgx_free_page(epc_page, encl);
 	if (secs_epc_page)
 		sgx_free_page(secs_epc_page, encl);
+	if (!rc) {
+		mutex_lock(&sgx_active_list_mutex);
+		list_add_tail(&entry->epc_page->epc_list, &sgx_active_list);
+		mutex_unlock(&sgx_active_list_mutex);
+	}
 	return rc ? ERR_PTR(rc) : entry;
 }
 
@@ -393,10 +398,9 @@ void sgx_encl_release(struct kref *ref)
 
 	radix_tree_for_each_slot(slot, &encl->page_tree, &iter, 0) {
 		entry = *slot;
-		if (entry->epc_page) {
-			list_del(&entry->epc_page->epc_list);
+		if (entry->epc_page)
 			sgx_free_page(entry->epc_page, encl);
-		}
+		
 		radix_tree_delete(&encl->page_tree, entry->addr >> PAGE_SHIFT);
 		kfree(entry);
 	}
